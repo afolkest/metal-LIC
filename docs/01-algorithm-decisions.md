@@ -10,13 +10,20 @@ It will be updated as we read the papers in `LIC_papers/`.
 - **Vector handling**: direction-only (normalized vectors).
 - **Kernel length**: user-specifiable; baseline default ~30 px at a 1024-scale.
 - **Kernel shape**: Hann/cosine window (symmetric).
-- **Precision**: float16 output (compute in float16 or float32 as needed).
+- **Step size**: default 1.0 px in texture space; optional 0.5 px “ultra” mode (parameterized).
+- **Precision**: float16 output; float32 accumulation and integration.
+- **Kernel output**: raw weighted sum; no global normalization.
+- **Boundary/mask truncation handling**: conditional renormalization + edge gains only when truncation is caused by an actual boundary/mask hit (see bryLIC notes).
+- **Sampling**: vector field bilinear (for RK2); input texture linear by default (nearest optional).
+- **Noise sampling**: wrap for generated noise; clamp for artist-provided textures (parameterized).
+- **Input prefiltering**: not required in core algorithm; recommended for generated noise (caller responsibility).
 - **Platform**: macOS, Apple Silicon, Metal compute.
 - **Quality bar**: extremely high; visible artifacts are unacceptable.
 - **Integration**: RK2 (midpoint) with bilinear sampling of the vector field.
-- **Boundary policy (domain)**: closed boundaries truncate streamlines; renormalize by kernel weight sum.
+- **Boundary policy (domain)**: closed boundaries truncate streamlines; periodic boundaries wrap and do not count as edge hits.
 - **Boundary policy (mask)**: optional mask boundaries; stop when entering a masked pixel.
-- **Edge gain / halo**: optional post-gain when truncation occurs (default off).
+- **Edge gain / halo**: optional, separate gains for mask vs domain edges with strength/power parameters.
+- **Zero-vector handling**: zero vectors do not advance the streamline (sampling remains at the current pixel).
 
 ## Baseline algorithm (assumed until proven otherwise)
 - For each output pixel, integrate a streamline forward and backward.
@@ -47,30 +54,31 @@ It will be updated as we read the papers in `LIC_papers/`.
 - **Streamline stepping**: DDA-style grid traversal using time-to-next-pixel; vectors are treated as piecewise-constant per cell (no bilinear interpolation).
 - **Boundary policy**: `closed` boundaries **truncate streamlines** (stop on edge hit); `periodic` boundaries wrap. Truncation is intentional to avoid edge smearing and enable edge-aware effects.
 - **Mask boundaries**: optional boolean mask; streamlines stop when entering a blocked pixel. If the starting pixel is masked, output is the center sample scaled by kernel sum.
-- **Kernel normalization on truncation**: if the kernel is truncated, the output is renormalized by `full_sum / used_sum` to avoid darkening.
-- **Edge gain (halo)**: optional gain based on how much of the kernel was truncated, applied only when a streamline actually hits a boundary (mask or domain). This specifically addresses edge darkening and can create aesthetic halos.
+- **Kernel truncation handling**:
+  - `full_sum = sum(kernel)`, `center_weight = kernel[kmid]`.
+  - `needs_boundary_processing = (used_sum > center_weight) && (used_sum < full_sum)`.
+  - `apply_mask_edge = hit_mask_edge && starting_pixel_not_masked`.
+  - Only when `needs_boundary_processing && (apply_mask_edge || hit_domain_edge)`:
+    - `support_factor = clamp((used_sum - center_weight) / (full_sum - center_weight), 0..1)`.
+    - Renormalize once: `value *= full_sum / used_sum`.
+    - Mask edge gain (if `apply_mask_edge`): `gain = 1 + edge_gain_strength * t^edge_gain_power * support_factor`.
+    - Domain edge gain (if `hit_domain_edge`): `gain = 1 + domain_edge_gain_strength * t^domain_edge_gain_power * support_factor`.
+    - `t = clamp((full_sum - used_sum) / full_sum, 0..1)`.
+  - If truncation happens for other reasons (e.g., NaNs), no renormalization/gain is applied.
+  - Periodic boundaries wrap and do not set `hit_domain_edge`.
 - **Kernel shape used in scripts/tests**: cosine/Hann window (`0.5 * (1 + cos(pi * x / L))`), symmetric; default streamlength ~30 px at 1024-scale.
 - **Polarization mode**: optional vector “sign continuity” (flip when dot product with last step is negative). Useful for sign-ambiguous fields (e.g., eigenvectors), not required for velocity fields.
 
 ## Known unknowns (to decide after reading)
 ### Integration
-- Step size: fixed in texture space vs adaptive; relation to kernel length L.
-- Handling of zero vectors / stagnation points (terminate, clamp, or fallback).
 - Symmetry enforcement across forward/backward integration.
 - Optional RK4 “ultra quality” mode vs single RK2 path.
 
 ### Kernel / convolution
-- Kernel normalization strategy (per-pixel vs fixed).
 - Forward/backward weighting (must be symmetric).
 
 ### Sampling & filtering
-- Texture sampling mode (nearest vs linear).
-- **Prefiltering** for input textures to avoid aliasing (especially for white noise).
 - Input texture size/tiling strategy to avoid visible periodicity.
-
-### Boundary behavior
-- Noise sampling: wrap vs clamp (wrap reduces edge smears for random inputs).
-- Avoiding edge darkening / bias from truncated streamlines.
 
 ### Performance strategy
 - Single-pass vs multi-pass LIC.
