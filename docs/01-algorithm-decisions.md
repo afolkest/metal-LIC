@@ -6,21 +6,25 @@ It will be updated as we read the papers in `LIC_papers/`.
 ## What we know (decisions locked for v1)
 - **Domain**: 2D static vector fields on a grid.
 - **Output**: grayscale LIC only.
-- **Seed signal**: arbitrary input texture (not limited to white noise).
+- **Seed signal**: arbitrary non-negative input texture (not limited to white noise).
 - **Vector handling**: direction-only (normalized vectors).
 - **Kernel length**: user-specifiable; baseline default ~30 px at a 1024-scale.
 - **Kernel shape**: Hann/cosine window (symmetric).
 - **Step size**: default 1.0 px in texture space; optional 0.5 px “ultra” mode (parameterized).
+- **Kernel indexing**: one kernel index per RK2 step; `steps = round(L / h)`, `N = 2*steps + 1`.
 - **Precision**: float16 output; float32 accumulation and integration.
 - **Kernel output**: raw weighted sum; no global normalization.
 - **Boundary/mask truncation handling**: conditional renormalization + edge gains only when truncation is caused by an actual boundary/mask hit (see bryLIC notes).
 - **Sampling**: vector field bilinear (for RK2); input texture linear by default (nearest optional).
 - **Noise sampling**: wrap for generated noise; clamp for artist-provided textures (parameterized).
 - **Input prefiltering**: not required in core algorithm; recommended for generated noise (caller responsibility).
+- **Iterations**: multi-pass convolution supported; each pass uses the previous pass output as input.
+- **Coordinate mapping**: 1:1 mapping (vector field, input texture, mask, and output share resolution); pixel centers at `(x+0.5, y+0.5)`.
+- **Scaling/zoom**: handled in wrappers by resampling u/v (and mask) to output resolution.
 - **Platform**: macOS, Apple Silicon, Metal compute.
 - **Quality bar**: extremely high; visible artifacts are unacceptable.
 - **Integration**: RK2 (midpoint) with bilinear sampling of the vector field.
-- **Boundary policy (domain)**: closed boundaries truncate streamlines; periodic boundaries wrap and do not count as edge hits.
+- **Boundary policy (domain)**: closed boundaries truncate streamlines; periodic mode deferred to later.
 - **Boundary policy (mask)**: optional mask boundaries; stop when entering a masked pixel.
 - **Edge gain / halo**: optional, separate gains for mask vs domain edges with strength/power parameters.
 - **Zero-vector handling**: zero vectors do not advance the streamline (sampling remains at the current pixel).
@@ -87,9 +91,11 @@ It will be updated as we read the papers in `LIC_papers/`.
 - Precision tradeoffs (float16 vs float32 in key steps).
 
 ### Data layout / coordination
-- Vector field resolution vs output resolution mapping.
 - Coordinate transforms between vector grid and output grid.
 - Handling of non-square or non-uniform fields.
+
+## Deferred items (post‑v1)
+- Periodic boundary mode.
 
 ## Unknown unknowns (to capture as we read)
 - Any algorithmic pitfalls or artifacts specific to GPU LIC.

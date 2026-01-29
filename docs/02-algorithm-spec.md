@@ -19,13 +19,13 @@ Compute a high-quality grayscale LIC on the GPU for static 2D vector fields, usi
 
 ## 3) Inputs
 - **Vector field texture**: 2-channel float texture representing V(x).
-- **Input texture**: arbitrary grayscale signal (noise or artist-provided).
+- **Input texture**: arbitrary non-negative grayscale signal (noise or artist-provided).
 - **Optional mask texture**: 1-channel boolean or float mask indicating blocked pixels.
 - **Parameters**:
   - `L`: kernel half-length in pixels (default ~30 px at 1024-scale).
   - `h`: step size (default 1.0 px; optional 0.5 px “ultra”).
   - `kernel`: fixed Hann/cosine window (v1).
-  - `boundary_mode`: closed for domain (truncate streamlines).
+  - `boundary_mode`: closed for domain (truncate streamlines). Periodic is reserved for later.
   - `edge_gain_strength`: mask edge gain strength (default 0).
   - `edge_gain_power`: mask edge gain exponent (default 2).
   - `domain_edge_gain_strength`: domain edge gain strength (default 0).
@@ -33,24 +33,32 @@ Compute a high-quality grayscale LIC on the GPU for static 2D vector fields, usi
   - `noise_sample_mode`: wrap for generated noise; clamp for artist textures.
   - `input_sample_mode`: linear default (nearest optional).
   - `precision_mode`: float16 output; float32 accumulation/integration.
+  - `iterations`: number of convolution passes (>= 1).
 
 ## 4) Output
 - **Grayscale LIC** image as float16 texture.
+- Output values are the **raw weighted sum** (not globally normalized).
+- Input texture values are expected to be **non-negative**.
+ - For `iterations > 1`, the output of each pass is used as the input texture for the next pass.
 
-## 5) Coordinate mapping (**TBD**)
-Define mapping from output pixel coordinates to vector-field texture coordinates.
-- Option A: vector field resolution == output resolution (1:1).
-- Option B: vector field sampled at a different resolution; scale accordingly.
+## 5) Coordinate mapping
+**v1 mapping is 1:1**: vector field, input texture, mask, and output share the same resolution.
+- Output pixel centers are at `(x + 0.5, y + 0.5)` in texture space.
+- Image space uses the standard image convention (x right, y down).
+
+**Scaling/transforming fields is out of core scope**:
+- If a different resolution or zoom is desired, resample the vector field (and mask) to the output resolution in a wrapper before invoking the core LIC.
 
 ## 6) Kernel
 - **Shape**: Hann/cosine window (symmetric).
-- **Definition** (for |s| <= L):
-  - `w(s) = 0.5 * (1 + cos(pi * s / L))`
-  - `w(s) = 0` for |s| > L.
-- **Discrete form**:
-  - Kernel is represented as a 1D array `kernel[k]` with center at `kmid`.
-  - `full_sum = sum(kernel)` (used for boundary processing).
-  - The convolution output is the weighted sum of samples; it is **not** globally normalized.
+- **Discrete form (RK2 steps)**:
+  - `steps = round(L / h)`
+  - `N = 2 * steps + 1`, `kmid = N // 2`
+  - `s_i = (i - kmid) * h` (signed distance per step)
+  - `kernel[i] = 0.5 * (1 + cos(pi * s_i / L))` for `|s_i| <= L`, else `0`
+  - **No weight scaling by `h`** (matches bryLIC raw weighted sum behavior).
+- **Normalization**:
+  - The convolution output is the raw weighted sum (not globally normalized).
   - Renormalization is applied **only** when a boundary or mask truncates the kernel (see Section 9).
 
 ## 7) Streamline integration
@@ -62,25 +70,33 @@ For each output pixel:
    - `x_next = x + h * v(x1)`
    - For backward integration, use `-v(x)`.
 4. Use **bilinear sampling** of the vector field for RK2.
+5. Each RK2 step corresponds to one kernel index in the forward/backward ranges.
 
 **Termination conditions**:
 - Hit domain boundary (closed): stop and truncate.
 - Hit masked pixel: stop and truncate.
-- Reached kernel length `L`.
+- Reached kernel length `L` (i.e., step count exceeds `steps`).
 - If a sampled vector is NaN, stop integration in that direction (no boundary hit is recorded).
 - If the vector is zero, the streamline does not advance; sampling continues at the same pixel.
 
 ## 8) Sampling & convolution
 For each step along the streamline (forward and backward):
-1. Compute signed distance `s` from the center (accumulate `h`).
-2. Select the corresponding discrete kernel weight `kernel[k]`.
+1. Each step advances by `h`; `step_count` determines `k` and `s_i`:
+   - Forward: `k = kmid + step_count`
+   - Backward: `k = kmid - step_count`
+2. Select `kernel[k]` (equivalently `kernel(s_i)`).
 3. Sample input texture at `x`.
 4. Accumulate `value += kernel[k] * sample` and `used_sum += kernel[k]`.
-5. Stop when `|s| >= L` or termination condition occurs.
+5. Stop when `step_count > steps` or termination condition occurs.
 
 Final output:
 - `output = value` (raw weighted sum).
 - Boundary/mask truncation may trigger renormalization and edge gain (Section 9).
+
+## 8.1) Multi-pass convolution
+- If `iterations > 1`, run the LIC pass repeatedly.
+- Each pass uses the **previous pass output** as the new input texture.
+- Use ping‑pong textures to avoid read/write hazards.
 
 **Input prefiltering (optional)**:
 - The core algorithm does not require prefiltering.
@@ -116,7 +132,7 @@ If `needs_boundary_processing && (apply_mask_edge || hit_domain_edge)` then:
 Notes:
 - Renormalization and gains are **only** applied when a boundary/mask truncates the kernel.
 - If truncation happens for other reasons (e.g., NaNs in the vector field), no renormalization is performed.
-- Periodic boundaries wrap and do **not** set `hit_domain_edge`.
+- Periodic boundaries are **not implemented in v1** (reserved for later).
 
 ## 10) Sampling mode
 - Vector field sampling: bilinear (for RK2).
@@ -131,7 +147,6 @@ Notes:
 Given identical inputs and parameters, output must be deterministic.
 
 ## 13) Open decisions (TBD)
-- Vector field resolution mapping to output (1:1 vs scaled).
 - Optional RK4 “ultra” mode vs RK2 only.
 - Input texture tiling strategy to avoid visible periodicity (especially for noise).
 
