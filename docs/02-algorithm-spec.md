@@ -104,7 +104,7 @@ struct LicParams {
 
 kernel void licKernel(
     texture2d<float, access::sample>  inputTex   [[texture(0)]],
-    texture2d<float2, access::sample> vectorTex  [[texture(1)]],
+    texture2d<float, access::sample>  vectorTex  [[texture(1)]],
     texture2d<uint, access::read>     maskTex    [[texture(2)]],
     texture2d<half, access::write>    outputTex  [[texture(3)]],
     constant LicParams&               params     [[buffer(0)]],
@@ -142,7 +142,9 @@ kernel void licKernel(
 ## 7) Streamline integration
 For each output pixel:
 1. Let `x0` be the output pixel center in texture coordinates.
-2. Initialize accumulation with the center sample at `x0`.
+2. Initialize accumulation with the center sample at `x0`:
+   - `value = kernel[kmid] * sample(inputTex, x0)`
+   - `used_sum = kernel[kmid]`
 3. Integrate **forward** and **backward** along `v(x)` using RK2 (midpoint). RK4 is deferred to post‑v1:
    - `x1 = x + 0.5 * h * v(x)`
    - `x_next = x + h * v(x1)`
@@ -180,6 +182,7 @@ Final output:
 - Multi-pass is supported in v1. If `iterations > 1`, run the LIC pass repeatedly.
 - Each pass uses the **previous pass output** as the new input texture.
 - Use ping‑pong textures to avoid read/write hazards.
+- Ping‑pong textures use `r16Float` (same as output). Metal promotes `r16Float` to float32 automatically when sampled through `texture2d<float, access::sample>`, so no special handling is needed. This precision is acceptable for v1 iteration counts.
  - Mask semantics apply **per pass** (starting masked pixels return `full_sum * center_sample` each pass).
 
 **Input prefiltering (optional)**:
