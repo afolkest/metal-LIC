@@ -56,6 +56,7 @@
 - Temporal behavior: static.
 - Data format / source: numerical grid (resolution often 2K-4K); no analytic field required.
 - Coordinate system / scaling: vector field normalized to direction only.
+- Input textures are full-resolution; sampling uses clamp addressing (no tiling) in v1.
 
 ## Output
 - Grayscale LIC.

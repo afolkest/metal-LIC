@@ -1,4 +1,4 @@
-# Algorithm Decisions (Draft)
+# Algorithm Decisions (v1)
 
 This document captures what is already decided, what is unknown, and what needs research.
 It will be updated as we read the papers in `LIC_papers/`.
@@ -24,7 +24,7 @@ It will be updated as we read the papers in `LIC_papers/`.
 - **Validation**: v1 uses a CPU reference for spec‑exact checks plus bryLIC parity as a warning signal; see `docs/03-validation-plan.md`.
 - **Vector normalization**: normalize after bilinear sampling with eps2 guard (`eps2 = 1e-12`); near‑zero => no advance.
 - **NaNs/invalid vectors**: stop integration in that direction before sampling; do not treat as boundary hit; no renorm/gain.
-- **Noise sampling**: wrap for generated noise; clamp for artist-provided textures (parameterized).
+- **Input sampling address mode**: clamp (no tiling) for all sources in v1.
 - **Input prefiltering**: not required in core algorithm; recommended for generated noise (caller responsibility).
 - **Input texture sources**: LIC consumes a GPU `r32Float` non-negative texture; it may be GPU-produced (preferred, e.g., CA) or CPU-uploaded for simple/offline use. A reference producer contract is defined in the spec (Section 3.1).
 - **Iterations**: multi-pass convolution supported; each pass uses the previous pass output as input.
@@ -85,35 +85,9 @@ It will be updated as we read the papers in `LIC_papers/`.
 - **Kernel shape used in scripts/tests**: cosine/Hann window (`0.5 * (1 + cos(pi * x / L))`), symmetric; default streamlength ~30 px at 1024-scale.
 - **Polarization mode**: optional vector “sign continuity” (flip when dot product with last step is negative). Useful for sign-ambiguous fields (e.g., eigenvectors), not required for velocity fields.
 
-## Known unknowns (to decide after reading)
-### Integration
-- RK2 (midpoint) only for v1; RK4 deferred to later.
-
-### Kernel / convolution
-- Forward/backward weighting (must be symmetric).
-
-### Sampling & filtering
-- Input texture size/tiling strategy to avoid visible periodicity.
-
-### Performance strategy
-- Single-pass vs multi-pass LIC.
-- Use of precomputed streamline buffers vs on-the-fly integration.
-- Threadgroup layout and memory access patterns.
-- Precision tradeoffs (float16 vs float32 in key steps).
-
-### Data layout / coordination
-- Coordinate transforms between vector grid and output grid.
-- Handling of non-square or non-uniform fields.
-
 ## Deferred items (post‑v1)
 - Periodic boundary mode.
 - RK4 integration path.
-
-## Unknown unknowns (to capture as we read)
-- Any algorithmic pitfalls or artifacts specific to GPU LIC.
-- Known optimizations that preserve quality at high resolution.
-- Stable “best practice” choices for kernel length and step size.
-- Recommended strategies for minimizing directional bias.
 
 ## Papers to read (first pass)
 - `LIC_papers/Cab93.md` (Cabral & Leedom): baseline LIC definition, kernel/integration choices.
@@ -123,5 +97,3 @@ It will be updated as we read the papers in `LIC_papers/`.
 
 ## Next steps
 - Read `Cab93.md` first to anchor baseline method.
-- Update “Known unknowns” with concrete decisions + rationale.
-- Create `docs/02-algorithm-spec.md` once decisions are locked.

@@ -1,7 +1,6 @@
-# Algorithm Spec (Draft)
+# Algorithm Spec (v1)
 
 This document specifies the v1 Line Integral Convolution (LIC) algorithm for Metal.
-Items marked **TBD** are explicit decisions that must be finalized before implementation.
 
 ## 1) Purpose
 Compute a high-quality grayscale LIC on the GPU for static 2D vector fields, using an arbitrary input texture as the seed signal.
@@ -33,7 +32,7 @@ Compute a high-quality grayscale LIC on the GPU for static 2D vector fields, usi
   - `domain_edge_gain_power`: domain edge gain exponent (default 2).
   - Mask IDs > 0 are treated identically in v1 (single gain); per‑ID gains are reserved for later.
   - `uv_mode`: **velocity only** (polarization deferred).
-  - `noise_sample_mode`: wrap for generated noise; clamp for artist textures.
+  - `noise_sample_mode`: clamp (fixed for v1; no tiling).
   - `input_sample_mode`: **linear (fixed for v1)**.
   - `precision_mode`: float16 output; float32 accumulation/integration.
   - `iterations`: number of convolution passes (>= 1).
@@ -80,7 +79,7 @@ These bindings are fixed for v1 to avoid ambiguity across host/shader code.
 - `texture(3)`: output (`r16Float`, write access).
 
 **Samplers**:
-- `sampler(0)`: input sampler (linear). Address mode set by the caller (wrap for generated noise; clamp for artist textures).
+- `sampler(0)`: input sampler (linear clamp; no tiling).
 - `sampler(1)`: vector sampler (linear clamp).
 
 **Buffers**:
@@ -221,9 +220,8 @@ Notes:
 
 ## 10) Sampling mode
 - Vector field sampling: bilinear (for RK2).
-- Input texture sampling: **linear (fixed for v1)**.
+- Input texture sampling: **linear clamp (fixed for v1; no tiling)**.
 - Mask sampling: nearest (integer read).
-- Noise sampling: wrap for generated noise; clamp for artist textures.
 
 ## 11) Precision
 **Quality mode (v1)**:
@@ -235,10 +233,7 @@ Notes:
 ## 12) Determinism
 Given identical inputs and parameters, output must be deterministic.
 
-## 13) Open decisions (TBD)
-- Input texture tiling strategy to avoid visible periodicity (especially for noise).
-
-## 14) Real-time defaults & performance notes
+## 13) Real-time defaults & performance notes
 **Defaults for real-time (v1)**:
 - `L`: ~30 px at 1024-scale (kernel half-length; full length ~60 px).
 - `h`: 1.0 px (0.5 px reserved for "ultra").
@@ -255,7 +250,7 @@ Given identical inputs and parameters, output must be deterministic.
 - Run a warm-up dispatch at startup to avoid first-frame timing spikes.
 - Tune threadgroup size with profiling; start with 8x8 or 16x16.
 
-## 15) Validation
+## 14) Validation
 See `docs/03-validation-plan.md` for the v1 validation plan (CPU reference, GPU vs CPU checks, and bryLIC parity warnings).
 
 ## Appendix A) Edge gain formula (reference)
