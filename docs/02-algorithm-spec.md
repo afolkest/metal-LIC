@@ -124,6 +124,13 @@ kernel void licKernel(
 **Scaling/transforming fields is out of core scope**:
 - If a different resolution or zoom is desired, resample the vector field (and mask) to the output resolution in a wrapper before invoking the core LIC.
 
+## 5.1) Sampling coordinates (canonical)
+- All positions `x` are in **pixel coordinates**; pixel `(i, j)` center is `(i + 0.5, j + 0.5)`.
+- Samplers must use **pixel coordinates** (`normalizedCoordinates = false` / `coord::pixel`).
+  - If normalized sampling is used, convert with `uv = x / float2(width, height)` before sampling.
+- Valid domain for sampling/integration is `x in [0.5, width - 0.5]` and `y in [0.5, height - 0.5]`.
+  - Leaving this domain is a **domain boundary hit** (closed boundary behavior).
+
 ## 6) Kernel
 - **Shape**: Hann/cosine window (symmetric).
 - **Discrete form (RK2 steps)**:
@@ -135,9 +142,14 @@ kernel void licKernel(
 - **Normalization**:
   - The convolution output is the raw weighted sum (not globally normalized).
   - Renormalization is applied **only** when a boundary or mask truncates the kernel (see Section 9).
- - The kernel is **constructed by the wrapper** and passed into the core GPU kernel.
- - The wrapper must provide an **odd-length** kernel with a well-defined center (`kmid`).
- - Even-length kernels are invalid in v1 (treat as input error in wrapper).
+- The kernel is **constructed by the wrapper** and passed into the core GPU kernel.
+- The wrapper must provide an **odd-length** kernel with a well-defined center (`kmid`).
+- Even-length kernels are invalid in v1 (treat as input error in wrapper).
+
+## 6.1) Parameter validity (canonical)
+- Require `L > 0` and `h > 0` (wrapper error otherwise).
+- `steps = round(L / h)` with ties **away from zero** (equivalently `floor(L / h + 0.5)` for positive inputs).
+- If `steps == 0`, set `kernel_len = 1`, `kernel[0] = 1`, and `full_sum = center_weight = 1`.
 
 ## 7) Streamline integration
 For each output pixel:
@@ -163,6 +175,16 @@ For each output pixel:
 - Reached kernel length `L` (i.e., step count exceeds `steps`).
 - If a sampled vector is NaN/inf, stop integration in that direction **before sampling** (no boundary hit is recorded).
 - If the vector is zero (or near-zero), the streamline does not advance; sampling continues at the same pixel.
+
+## 7.1) Per-step boundary & mask checks (canonical order)
+For each step `step_count = 1..steps` in a direction:
+1. Compute `x1 = x + 0.5 * h * v(x)`. If `x1` is outside the domain, set `hit_domain_edge = true` and stop (no sample).
+2. Compute `x_next = x + h * v(x1)`. If `x_next` is outside the domain, set `hit_domain_edge = true` and stop (no sample).
+3. Mask lookup uses pixel mapping: `mask_idx = uint2(floor(x_next))`.
+   - If `mask[mask_idx] != 0`, set `hit_mask_edge = true` and stop (no sample).
+4. Sample input at `x_next`, accumulate, and update `used_sum`.
+5. Set `x = x_next`.
+   - Even if `x_next == x` (zero/near-zero vector), still count the step and sample at the current pixel to ensure termination.
 
 ## 8) Sampling & convolution
 For each step along the streamline (forward and backward):
