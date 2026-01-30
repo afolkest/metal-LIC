@@ -9,10 +9,12 @@
 - [ ] Host encoder — compute pipeline creation, texture allocation (r32Float input, rg32Float vector field, r8Uint mask, r16Float output), sampler setup (linear clamp × 2, pixel coordinates), buffer binding per Section 4.2
 - [ ] Domain boundary checks — closed boundaries; check `x1` then `x_next` against `[0.5, W-0.5]`/`[0.5, H-0.5]` before sampling, set `hit_domain_edge` on first violation
 - [ ] Zero-vector handling (no advance, still count step + sample) and NaN/inf termination (stop before sample, no boundary hit recorded)
+- [ ] Function constants — declare `kMaskEnabled`, `kEdgeGainsEnabled`, `kDebugMode` as MSL function constants; build specialized pipeline variants at init; cache by configuration key
+- [ ] Debug visualization — `kDebugMode` function constant (0=off, 1=step count heat map, 2=boundary hit, 3=used_sum ratio); when active, output debug value instead of LIC result
 - [ ] Simple test harness — generate uniform vector field + white noise input, run LIC, write output image, visual check
 - [ ] Smoke test with vortex field to catch directional bias / spiral artifacts
 
-**Exit criterion**: shader produces visually plausible LIC on uniform + vortex fields, no crashes.
+**Exit criterion**: shader produces visually plausible LIC on uniform + vortex fields, no crashes. Function constants compile and select correct code paths.
 
 ## M2: Full spec compliance + validation
 
@@ -29,6 +31,8 @@
 
 - [ ] Profile on M1 Pro at 2K and 4K
 - [ ] Threadgroup size tuning (start 8×8 / 16×16, measure)
+- [ ] Occupancy & register pressure analysis — GPU capture → shader profiler; check max concurrent threads; reduce live registers if occupancy is low (split loops, reduce temporaries)
+- [ ] Bandwidth analysis — GPU capture → check ALU-bound vs memory-bound limiter at 4K; if bandwidth-limited, evaluate access pattern coherence and format tightening
 - [ ] Resource reuse — precreated pipelines, samplers, buffers; no per-frame allocation
 - [ ] Multiple in-flight command buffers
 - [ ] Warm-up dispatch

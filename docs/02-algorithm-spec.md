@@ -86,8 +86,21 @@ These bindings are fixed for v1 to avoid ambiguity across host/shader code.
 - `buffer(0)`: params struct `LicParams` (read-only).
 - `buffer(1)`: kernel weights array `float kernel[kernel_len]` (read-only).
 
+**Function constants**:
+Use Metal function constants for compile-time specialization of code paths that are uniform across a dispatch. The compiler eliminates dead branches entirely, avoiding per-pixel runtime cost.
+- `function_constant(0)`: `kMaskEnabled` (`bool`) — controls mask texture reads and mask boundary logic.
+- `function_constant(1)`: `kEdgeGainsEnabled` (`bool`) — controls boundary processing (renormalization + edge gains, Section 9).
+- `function_constant(2)`: `kDebugMode` (`uint`) — selects debug visualization output (0 = off / normal LIC, 1 = step count heat map, 2 = boundary hit visualization, 3 = used_sum / full_sum ratio).
+
+The host builds specialized `MTLComputePipelineState` variants for each active combination and caches them at init time. When masking is disabled, a 1x1 zero mask texture is still bound (keeps the signature uniform) but the shader skips mask reads entirely.
+
 **MSL signature (reference)**:
 ```metal
+// Function constants (compile-time specialization)
+constant bool kMaskEnabled      [[function_constant(0)]];
+constant bool kEdgeGainsEnabled [[function_constant(1)]];
+constant uint kDebugMode        [[function_constant(2)]];
+
 struct LicParams {
     float h;
     float eps2;
@@ -274,8 +287,23 @@ Given identical inputs and parameters, output must be deterministic.
 - CPU-provided textures are acceptable for simple use, but avoid per-frame full-size uploads for real-time.
 - Run a warm-up dispatch at startup to avoid first-frame timing spikes.
 - Tune threadgroup size with profiling; start with 8x8 or 16x16.
+- Use function constants to eliminate dead code paths (mask, edge gains, debug) at compile time; cache specialized pipelines.
+- Profile occupancy and register pressure via GPU capture; reduce live registers if occupancy is low.
+- Check ALU-bound vs memory-bound limiter at 4K; streamline walks diverge and may stress texture cache.
 
-## 14) Validation
+## 14) Debug visualization
+The shader supports a compile-time debug mode via the `kDebugMode` function constant (Section 4.2). When `kDebugMode != 0`, the shader writes a debug value to the output instead of the LIC result:
+
+| `kDebugMode` | Output | Purpose |
+|---|---|---|
+| 0 | Normal LIC value | Production |
+| 1 | Step count (forward + backward) / (2 * steps) | Integration length heat map — reveals early termination |
+| 2 | Boundary hit flags (0.0 = none, 0.5 = mask only, 0.75 = domain only, 1.0 = both) | Boundary hit visualization |
+| 3 | used_sum / full_sum | Kernel support ratio — reveals truncation extent |
+
+Debug pipelines are built at init alongside production pipelines using the same function constant mechanism. Debug output is float16 in [0, 1] for direct visualization.
+
+## 15) Validation
 See `docs/03-validation-plan.md` for the v1 validation plan (CPU reference, GPU vs CPU checks, and bryLIC parity warnings).
 
 ## Appendix A) Edge gain formula (reference)

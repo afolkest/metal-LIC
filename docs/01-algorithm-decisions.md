@@ -40,6 +40,8 @@ It will be updated as we read the papers in `LIC_papers/`.
   - v1 treats all nonzero IDs identically; per‑ID gains reserved for later.
 - **Edge gain / halo**: optional, separate gains for mask vs domain edges with strength/power parameters.
 - **Zero-vector handling**: zero vectors do not advance the streamline (sampling remains at the current pixel).
+- **Function constants (Metal)**: use `function_constant` for compile-time specialization of mask enabled/disabled, edge gains enabled/disabled, and debug mode selection. The compiler eliminates dead branches entirely. Host caches specialized `MTLComputePipelineState` variants at init. See spec Section 4.2.
+- **Debug visualization**: shader supports a `kDebugMode` function constant (0=off, 1=step count heat map, 2=boundary hit, 3=used_sum/full_sum ratio). Debug output replaces LIC output for development/profiling. See spec Section 14.
 
 ## Baseline algorithm (assumed until proven otherwise)
 - For each output pixel, integrate a streamline forward and backward.

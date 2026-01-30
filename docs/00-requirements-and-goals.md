@@ -45,6 +45,8 @@
 - CPU-provided textures are acceptable for simple use, but avoid per-frame full-size uploads for real-time.
 - Use a warm-up dispatch at startup to avoid first-frame timing spikes.
 - Tune threadgroup size with profiling; start with 8x8 or 16x16.
+- Use Metal function constants for compile-time specialization (mask on/off, edge gains on/off, debug mode); cache specialized pipeline variants at init.
+- Profile occupancy and register pressure via GPU capture; streamline walks are texture-heavy (~60 samples/pixel at default L) and may be bandwidth-limited at 4K.
 
 ## Quality targets
 - Visual fidelity: extremely high; suitable for fine-art output.
