@@ -600,6 +600,70 @@ final class LICInvariantTests: XCTestCase {
             "Boundary pixels must differ between edgeGainsEnabled true vs false")
     }
 
+    // MARK: - Domain edge gain with nonzero strength
+
+    /// Domain edge gain code path with nonzero strength must produce correct results.
+    /// Uses a rightward field on 16×16 so edge pixels hit domain boundaries,
+    /// then verifies GPU matches CPU with domainEdgeGainStrength > 0.
+    func testDomainEdgeGain_nonzeroStrength_gpuMatchesCPU() throws {
+        let size = 16
+        let (params, weights) = try LICKernel.build(L: 5,
+            domainEdgeGainStrength: 0.5, domainEdgeGainPower: 2)
+        let config = LICPipelineConfig(edgeGainsEnabled: true)
+        try encoder.buildPipeline(for: config)
+
+        var rng = SplitMix64(seed: 22222)
+        let input = (0..<size * size).map { _ in Float.random(in: 0...1, using: &rng) }
+        let field = [SIMD2<Float>](repeating: SIMD2<Float>(1, 0), count: size * size)
+
+        let gpuResult = try runGPU(
+            input: input, field: field,
+            width: size, height: size,
+            params: params, weights: weights, config: config)
+
+        let cpuResult = LICReferenceCPU.run(
+            input: input, vectorField: field,
+            width: size, height: size,
+            params: params, kernelWeights: weights,
+            edgeGainsEnabled: true)
+
+        var maxErr: Float = 0
+        var meanErr: Float = 0
+        for i in 0..<(size * size) {
+            let err = abs(gpuResult[i] - cpuResult[i])
+            maxErr = max(maxErr, err)
+            meanErr += err
+        }
+        meanErr /= Float(size * size)
+
+        print("--- Domain edge gain (strength=0.5) ---")
+        print("maxErr: \(maxErr), meanErr: \(meanErr), full_sum: \(params.fullSum)")
+
+        XCTAssertLessThan(meanErr, params.fullSum * 0.002,
+            "Domain edge gain: mean GPU/CPU error too large (\(meanErr))")
+        XCTAssertLessThan(maxErr, params.fullSum * 0.01,
+            "Domain edge gain: max GPU/CPU error too large (\(maxErr))")
+
+        // Verify gain actually changed boundary pixels: run with strength=0
+        let (paramsNoGain, weightsNoGain) = try LICKernel.build(L: 5)
+        let noGainResult = try runGPU(
+            input: input, field: field,
+            width: size, height: size,
+            params: paramsNoGain, weights: weightsNoGain, config: config)
+
+        var boundaryDiffCount = 0
+        for y in 0..<size {
+            for x in [0, size - 1] {
+                let idx = y * size + x
+                if gpuResult[idx] != noGainResult[idx] {
+                    boundaryDiffCount += 1
+                }
+            }
+        }
+        XCTAssertGreaterThan(boundaryDiffCount, 0,
+            "Domain edge gain must change boundary pixel values vs strength=0")
+    }
+
     // MARK: - GPU execution helpers
 
     private func runGPUMultiPass(

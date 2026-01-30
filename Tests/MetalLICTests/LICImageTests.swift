@@ -89,9 +89,12 @@ final class LICImageTests: XCTestCase {
 
             // Boundary-renormalized pixels can diverge due to float32 vs float64
             // position tracking (one extra/fewer step changes used_sum, which
-            // renormalization amplifies). Mean error is the better metric.
+            // renormalization amplifies). Mean error is the tighter metric;
+            // max error is a generous guard against catastrophically wrong pixels.
             XCTAssertLessThan(meanDiff, params.fullSum * 0.001,
                               "\(name): GPU/CPU mean error too large")
+            XCTAssertLessThan(maxDiff, params.fullSum * 0.05,
+                              "\(name): GPU/CPU max error too large (catastrophic pixel)")
         }
 
         print("\nImages: \(Self.outputDir)")
@@ -149,6 +152,13 @@ final class LICImageTests: XCTestCase {
             let tolerance = params.fullSum * 0.0002 * powf(10.0, Float(iters - 1))
             XCTAssertLessThan(meanDiff, tolerance,
                 "\(iters)-pass: GPU/CPU mean error too large (\(meanDiff))")
+
+            // Max error: generous guard against catastrophically wrong pixels.
+            // Error amplifies ~fullSum per pass; scale tolerance accordingly.
+            let maxTolerance = params.fullSum * 0.02
+                * powf(Float(params.fullSum), Float(iters - 1))
+            XCTAssertLessThan(maxDiff, maxTolerance,
+                "\(iters)-pass: GPU/CPU max error too large (\(maxDiff))")
         }
 
         print("\nImages: \(Self.outputDir)")
