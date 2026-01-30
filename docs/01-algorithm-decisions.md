@@ -2,13 +2,14 @@
 
 This document captures what is already decided, what is unknown, and what needs research.
 It will be updated as we read the papers in `LIC_papers/`.
+**Consistency rule**: this doc must match `docs/02-algorithm-spec.md`. The spec is the source of truth for v1 decisions.
 
 ## What we know (decisions locked for v1)
 - **Domain**: 2D static vector fields on a grid.
 - **Output**: grayscale LIC only.
 - **Seed signal**: arbitrary non-negative input texture (not limited to white noise).
 - **Vector handling**: direction-only (normalized vectors); velocity mode only (no polarization in v1).
-- **Kernel length**: user-specifiable; baseline default ~30 px at a 1024-scale (wrapper-level).
+- **Kernel half-length `L`**: user-specifiable; baseline default ~30 px at a 1024-scale (full length ~60 px; wrapper-level).
 - **Kernel shape**: Hann/cosine window (symmetric).
 - **Step size**: default 1.0 px in texture space; optional 0.5 px “ultra” mode (parameterized).
 - **Kernel indexing**: one kernel index per RK2 step; `steps = round(L / h)`, `N = 2*steps + 1`.
@@ -19,10 +20,13 @@ It will be updated as we read the papers in `LIC_papers/`.
 - **Boundary/mask truncation handling**: conditional renormalization + edge gains only when truncation is caused by an actual boundary/mask hit (see bryLIC notes).
 - **Sampling**: vector field bilinear (for RK2); input texture linear (fixed for v1); mask sampled as nearest integer.
 - **Texture formats (v1)**: input `r32Float`, vector field `rg32Float`, output `r16Float`, mask `r8Uint`.
+- **Resource bindings (v1)**: fixed binding map for textures/samplers/buffers is defined in the algorithm spec (Section 4.2); host/shader must match exactly.
+- **Validation**: v1 uses a CPU reference for spec‑exact checks plus bryLIC parity as a warning signal; see `docs/03-validation-plan.md`.
 - **Vector normalization**: normalize after bilinear sampling with eps2 guard (`eps2 = 1e-12`); near‑zero => no advance.
 - **NaNs/invalid vectors**: stop integration in that direction before sampling; do not treat as boundary hit; no renorm/gain.
 - **Noise sampling**: wrap for generated noise; clamp for artist-provided textures (parameterized).
 - **Input prefiltering**: not required in core algorithm; recommended for generated noise (caller responsibility).
+- **Input texture sources**: LIC consumes a GPU `r32Float` non-negative texture; it may be GPU-produced (preferred, e.g., CA) or CPU-uploaded for simple/offline use. A reference producer contract is defined in the spec (Section 3.1).
 - **Iterations**: multi-pass convolution supported; each pass uses the previous pass output as input.
 - **Mask (multi-pass)**: starting-mask behavior applies per pass (return `full_sum * center_sample` each pass).
 - **Coordinate mapping**: 1:1 mapping (vector field, input texture, mask, and output share resolution); pixel centers at `(x+0.5, y+0.5)`.
@@ -83,8 +87,7 @@ It will be updated as we read the papers in `LIC_papers/`.
 
 ## Known unknowns (to decide after reading)
 ### Integration
-- Symmetry enforcement across forward/backward integration.
-- Optional RK4 “ultra quality” mode vs single RK2 path.
+- RK2 (midpoint) only for v1; RK4 deferred to later.
 
 ### Kernel / convolution
 - Forward/backward weighting (must be symmetric).
@@ -104,6 +107,7 @@ It will be updated as we read the papers in `LIC_papers/`.
 
 ## Deferred items (post‑v1)
 - Periodic boundary mode.
+- RK4 integration path.
 
 ## Unknown unknowns (to capture as we read)
 - Any algorithmic pitfalls or artifacts specific to GPU LIC.

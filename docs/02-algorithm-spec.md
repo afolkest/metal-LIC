@@ -20,6 +20,7 @@ Compute a high-quality grayscale LIC on the GPU for static 2D vector fields, usi
 ## 3) Inputs
  - **Vector field texture**: 2-channel float texture representing V(x) (direction field).
  - **Input texture**: arbitrary non-negative grayscale signal (noise or artist-provided).
+ - **Input source**: the input texture may be GPU-generated or CPU-provided (see Section 3.1).
  - **Optional mask texture**: 1-channel **uint** mask where `0 = unblocked`, `>0 = blocked`.
 - **Parameters**:
   - `L`: kernel half-length in pixels (default ~30 px at 1024-scale), **wrapper-level**.
@@ -37,6 +38,26 @@ Compute a high-quality grayscale LIC on the GPU for static 2D vector fields, usi
   - `precision_mode`: float16 output; float32 accumulation/integration.
   - `iterations`: number of convolution passes (>= 1).
 
+## 3.1) Input texture sources
+The LIC kernel consumes a GPU `r32Float` input texture with **non-negative** values.
+
+**Allowed sources**:
+- **GPU producer (recommended for real-time)**: any compute pass (e.g., cellular automata) that writes to the input texture. The producer should encode into the same command buffer and output a GPU-resident `r32Float` texture.
+- **CPU-provided texture (simple/offline)**: upload to a GPU `r32Float` texture before running LIC. This is acceptable for occasional updates; avoid per-frame full-size uploads for real-time use.
+
+**Producer contract (reference)**:
+The producer writes into a provided GPU texture (no CPU readback) and can be chained directly before LIC.
+```swift
+protocol TextureProducer {
+    var outputTexture: MTLTexture { get }
+    func encode(commandBuffer: MTLCommandBuffer, time: Float)
+}
+
+// Example usage:
+producer.encode(commandBuffer: cb, time: t)
+licEncoder.encode(commandBuffer: cb, inputTexture: producer.outputTexture)
+```
+
 ## 4) Output
 - **Grayscale LIC** image as float16 texture.
 - Output values are the **raw weighted sum** (not globally normalized).
@@ -48,6 +69,52 @@ Compute a high-quality grayscale LIC on the GPU for static 2D vector fields, usi
 - Vector field: `rg32Float`
 - Output: `r16Float`
 - Mask: `r8Uint`
+
+## 4.2) Resource bindings (v1)
+These bindings are fixed for v1 to avoid ambiguity across host/shader code.
+
+**Textures**:
+- `texture(0)`: input texture (`r32Float`, sample access).
+- `texture(1)`: vector field (`rg32Float`, sample access).
+- `texture(2)`: mask (`r8Uint`, read access). If masking is disabled, bind a 1x1 zero mask texture and use the same code path.
+- `texture(3)`: output (`r16Float`, write access).
+
+**Samplers**:
+- `sampler(0)`: input sampler (linear). Address mode set by the caller (wrap for generated noise; clamp for artist textures).
+- `sampler(1)`: vector sampler (linear clamp).
+
+**Buffers**:
+- `buffer(0)`: params struct `LicParams` (read-only).
+- `buffer(1)`: kernel weights array `float kernel[kernel_len]` (read-only).
+
+**MSL signature (reference)**:
+```metal
+struct LicParams {
+    float h;
+    float eps2;
+    uint  steps;
+    uint  kmid;
+    uint  kernel_len;
+    float full_sum;
+    float center_weight;
+    float edge_gain_strength;
+    float edge_gain_power;
+    float domain_edge_gain_strength;
+    float domain_edge_gain_power;
+};
+
+kernel void licKernel(
+    texture2d<float, access::sample>  inputTex   [[texture(0)]],
+    texture2d<float2, access::sample> vectorTex  [[texture(1)]],
+    texture2d<uint, access::read>     maskTex    [[texture(2)]],
+    texture2d<half, access::write>    outputTex  [[texture(3)]],
+    constant LicParams&               params     [[buffer(0)]],
+    constant float*                   kernel     [[buffer(1)]],
+    sampler                           inputSamp  [[sampler(0)]],
+    sampler                           vectorSamp [[sampler(1)]],
+    uint2                             gid        [[thread_position_in_grid]]
+);
+```
 
 ## 5) Coordinate mapping
 **v1 mapping is 1:1**: vector field, input texture, mask, and output share the same resolution.
@@ -77,7 +144,7 @@ Compute a high-quality grayscale LIC on the GPU for static 2D vector fields, usi
 For each output pixel:
 1. Let `x0` be the output pixel center in texture coordinates.
 2. Initialize accumulation with the center sample at `x0`.
-3. Integrate **forward** and **backward** along `v(x)` using RK2 (midpoint):
+3. Integrate **forward** and **backward** along `v(x)` using RK2 (midpoint). RK4 is deferred to post‑v1:
    - `x1 = x + 0.5 * h * v(x)`
    - `x_next = x + h * v(x1)`
    - For backward integration, use `-v(x)`.
@@ -111,7 +178,7 @@ Final output:
 - Boundary/mask truncation may trigger renormalization and edge gain (Section 9).
 
 ## 8.1) Multi-pass convolution
-- If `iterations > 1`, run the LIC pass repeatedly.
+- Multi-pass is supported in v1. If `iterations > 1`, run the LIC pass repeatedly.
 - Each pass uses the **previous pass output** as the new input texture.
 - Use ping‑pong textures to avoid read/write hazards.
  - Mask semantics apply **per pass** (starting masked pixels return `full_sum * center_sample` each pass).
@@ -169,8 +236,27 @@ Notes:
 Given identical inputs and parameters, output must be deterministic.
 
 ## 13) Open decisions (TBD)
-- Optional RK4 “ultra” mode vs RK2 only.
 - Input texture tiling strategy to avoid visible periodicity (especially for noise).
+
+## 14) Real-time defaults & performance notes
+**Defaults for real-time (v1)**:
+- `L`: ~30 px at 1024-scale (kernel half-length; full length ~60 px).
+- `h`: 1.0 px (0.5 px reserved for "ultra").
+- `iterations`: 1.
+- `edge_gain_strength` / `domain_edge_gain_strength`: 0 (off).
+- Precision: float32 integration/accumulation; float16 output.
+
+**Performance guidance (implementation)**:
+- Precreate and reuse compute pipelines, samplers, buffers, and textures.
+- Keep textures GPU-resident; avoid per-frame CPU readbacks.
+- Use multiple in-flight command buffers to avoid CPU-GPU sync stalls.
+- Prefer GPU noise animation (procedural or small seed updates) over full texture uploads.
+- CPU-provided textures are acceptable for simple use, but avoid per-frame full-size uploads for real-time.
+- Run a warm-up dispatch at startup to avoid first-frame timing spikes.
+- Tune threadgroup size with profiling; start with 8x8 or 16x16.
+
+## 15) Validation
+See `docs/03-validation-plan.md` for the v1 validation plan (CPU reference, GPU vs CPU checks, and bryLIC parity warnings).
 
 ## Appendix A) Edge gain formula (reference)
 Let:
