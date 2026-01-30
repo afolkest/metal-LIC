@@ -35,6 +35,12 @@ public final class LICEncoder {
     // 1x1 zero mask for when masking is disabled (keeps signature uniform).
     private let dummyMask: MTLTexture
 
+    // Ping-pong r16Float textures for multi-pass convolution (Section 8.1).
+    private var pingTexture: MTLTexture?
+    private var pongTexture: MTLTexture?
+    private var pingPongWidth: Int = 0
+    private var pingPongHeight: Int = 0
+
     public init(device: MTLDevice) throws {
         self.device = device
         self.library = try ShaderLibrary.makeLibrary(device: device)
@@ -165,6 +171,86 @@ public final class LICEncoder {
         encoder.dispatchThreads(gridSize, threadsPerThreadgroup: threadgroupSize)
 
         encoder.endEncoding()
+    }
+
+    // MARK: - Multi-pass
+
+    /// Encodes multi-pass LIC convolution into a single command buffer
+    /// using ping-pong r16Float textures (Section 8.1).
+    ///
+    /// For `iterations == 1`, delegates directly to `encode()`.
+    /// For `iterations > 1`, each pass reads the previous pass output and
+    /// the final result is written to `outputTexture`.
+    ///
+    /// Mask semantics apply per pass: starting-pixel masked pixels return
+    /// `full_sum * center_sample` each pass.
+    public func encodeMultiPass(
+        commandBuffer: MTLCommandBuffer,
+        params: LicParams,
+        kernelWeights: [Float],
+        inputTexture: MTLTexture,
+        vectorField: MTLTexture,
+        outputTexture: MTLTexture,
+        maskTexture: MTLTexture? = nil,
+        config: LICPipelineConfig = LICPipelineConfig(),
+        iterations: Int = 1
+    ) throws {
+        precondition(iterations >= 1, "iterations must be >= 1")
+
+        if iterations == 1 {
+            try encode(
+                commandBuffer: commandBuffer,
+                params: params, kernelWeights: kernelWeights,
+                inputTexture: inputTexture, vectorField: vectorField,
+                outputTexture: outputTexture, maskTexture: maskTexture,
+                config: config)
+            return
+        }
+
+        let w = outputTexture.width
+        let h = outputTexture.height
+        try ensurePingPongTextures(width: w, height: h)
+        guard let ping = pingTexture, let pong = pongTexture else {
+            throw LICError.textureCreationFailed
+        }
+
+        let pingPong = [ping, pong]
+        var previousOutput: MTLTexture = inputTexture
+
+        for pass in 0..<iterations {
+            let isLastPass = (pass == iterations - 1)
+
+            let passOutput: MTLTexture
+            if isLastPass {
+                passOutput = outputTexture
+            } else {
+                passOutput = pingPong[pass % 2]
+            }
+
+            try encode(
+                commandBuffer: commandBuffer,
+                params: params, kernelWeights: kernelWeights,
+                inputTexture: previousOutput, vectorField: vectorField,
+                outputTexture: passOutput, maskTexture: maskTexture,
+                config: config)
+
+            previousOutput = passOutput
+        }
+    }
+
+    /// Ensures internal ping-pong textures exist at the required dimensions.
+    /// Reuses existing textures if dimensions match.
+    private func ensurePingPongTextures(width: Int, height: Int) throws {
+        if pingPongWidth == width && pingPongHeight == height,
+           pingTexture != nil && pongTexture != nil {
+            return
+        }
+        pingTexture = try makeOutputTexture(width: width, height: height)
+        pingTexture?.label = "LIC ping"
+        pongTexture = try makeOutputTexture(width: width, height: height)
+        pongTexture?.label = "LIC pong"
+        pingPongWidth = width
+        pingPongHeight = height
     }
 }
 

@@ -58,7 +58,8 @@ final class LICImageTests: XCTestCase {
             let cpuResult = LICReferenceCPU.run(
                 input: noise, vectorField: field,
                 width: size, height: size,
-                params: params, kernelWeights: weights)
+                params: params, kernelWeights: weights,
+                edgeGainsEnabled: true)
             let cpuTime = CFAbsoluteTimeGetCurrent() - cpuStart
 
             writePNG(cpuResult, width: size, height: size,
@@ -96,7 +97,106 @@ final class LICImageTests: XCTestCase {
         print("\nImages: \(Self.outputDir)")
     }
 
+    // MARK: - Multi-pass image generation
+
+    func testGenerateMultiPassImages() throws {
+        let size = 512
+        let L: Float = 30
+        let (params, weights) = try LICKernel.build(L: L)
+        let config = LICPipelineConfig(edgeGainsEnabled: true)
+        try encoder.buildPipeline(for: config)
+
+        var rng = SplitMix64(seed: 12345)
+        let noise = (0..<size * size).map { _ in Float.random(in: 0...1, using: &rng) }
+        let field = makeVortexField(width: size, height: size)
+
+        print("\n=== Multi-Pass LIC Images ===")
+        print("Output: \(Self.outputDir)")
+        print("Size: \(size)x\(size), L=\(L)\n")
+
+        for iters in [1, 2, 3] {
+            let gpuResult = try runGPUMultiPass(
+                noise: noise, field: field,
+                width: size, height: size,
+                params: params, weights: weights,
+                config: config, iterations: iters)
+
+            writePNG(gpuResult, width: size, height: size,
+                     normalize: params.fullSum, name: "gpu_vortex_\(iters)pass")
+
+            let cpuResult = LICReferenceCPU.runMultiPass(
+                input: noise, vectorField: field,
+                width: size, height: size,
+                params: params, kernelWeights: weights,
+                edgeGainsEnabled: true, iterations: iters)
+
+            writePNG(cpuResult, width: size, height: size,
+                     normalize: params.fullSum, name: "cpu_vortex_\(iters)pass")
+
+            let diff = zip(cpuResult, gpuResult).map { abs($0 - $1) }
+            let maxDiff = diff.max() ?? 0
+            let meanDiff = diff.reduce(0, +) / Float(diff.count)
+
+            writePNG(diff, width: size, height: size,
+                     normalize: params.fullSum / 50.0, name: "diff_vortex_\(iters)pass")
+
+            print(String(format: "%d pass  maxErr %.4f  meanErr %.6f",
+                         iters, maxDiff, meanDiff))
+
+            // Error compounds exponentially across passes due to FP divergence
+            // (CPU vs GPU rsqrt, FMA, bilinear hardware). Observed growth is
+            // roughly full_sum/3 per pass for mean error on vortex fields.
+            let tolerance = params.fullSum * 0.0002 * powf(10.0, Float(iters - 1))
+            XCTAssertLessThan(meanDiff, tolerance,
+                "\(iters)-pass: GPU/CPU mean error too large (\(meanDiff))")
+        }
+
+        print("\nImages: \(Self.outputDir)")
+    }
+
     // MARK: - GPU execution
+
+    private func runGPUMultiPass(
+        noise: [Float], field: [SIMD2<Float>],
+        width: Int, height: Int,
+        params: LicParams, weights: [Float],
+        config: LICPipelineConfig,
+        iterations: Int
+    ) throws -> [Float] {
+        let inputTex = try encoder.makeInputTexture(width: width, height: height)
+        let vectorTex = try encoder.makeVectorFieldTexture(width: width, height: height)
+        let outputTex = try encoder.makeOutputTexture(width: width, height: height)
+
+        noise.withUnsafeBufferPointer { ptr in
+            inputTex.replace(
+                region: MTLRegionMake2D(0, 0, width, height),
+                mipmapLevel: 0,
+                withBytes: ptr.baseAddress!,
+                bytesPerRow: width * MemoryLayout<Float>.stride)
+        }
+
+        let packed = field.flatMap { [Float($0.x), Float($0.y)] }
+        packed.withUnsafeBufferPointer { ptr in
+            vectorTex.replace(
+                region: MTLRegionMake2D(0, 0, width, height),
+                mipmapLevel: 0,
+                withBytes: ptr.baseAddress!,
+                bytesPerRow: width * 2 * MemoryLayout<Float>.stride)
+        }
+
+        let cb = device.makeCommandQueue()!.makeCommandBuffer()!
+        try encoder.encodeMultiPass(
+            commandBuffer: cb, params: params, kernelWeights: weights,
+            inputTexture: inputTex, vectorField: vectorTex,
+            outputTexture: outputTex,
+            config: config, iterations: iterations)
+        cb.commit()
+        cb.waitUntilCompleted()
+        XCTAssertEqual(cb.status, .completed,
+                       "GPU failed: \(cb.error?.localizedDescription ?? "unknown")")
+
+        return readR16Float(outputTex, width: width, height: height)
+    }
 
     private func runGPU(
         noise: [Float], field: [SIMD2<Float>],

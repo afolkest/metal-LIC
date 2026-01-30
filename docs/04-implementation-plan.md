@@ -20,11 +20,12 @@
 
 - [x] Mask texture support (r8Uint nearest read, starting-pixel masked path, stop-on-enter; check `mask[floor(x_next)]` before sampling)
 - [x] Boundary processing — renormalization + edge gains (Section 9: support_factor, mask edge gain, domain edge gain)
-- [ ] Multi-pass convolution (ping-pong r16Float textures, per-pass mask semantics)
+- [x] Multi-pass convolution (ping-pong r16Float textures, per-pass mask semantics)
 - [x] CPU reference implementation (spec-exact: RK2 + bilinear, same kernel, same boundary/mask rules, same `round(L/h)` and domain bounds)
 - [x] GPU vs CPU comparison tests (MAE, max-abs error, f16 tolerances)
 - [x] Deterministic unit tests on small grids (16×16) for: determinism, kernel indexing, zero-vector, NaN/inf, mask semantics (starting-pixel + stop-on-enter)
-- [ ] Deterministic unit tests for remaining invariants: boundary truncation details, multi-pass (blocked on multi-pass implementation)
+- [x] Deterministic unit tests for multi-pass (single-iteration equivalence, GPU/CPU match, differs-from-single, mask per-pass, determinism)
+- [x] Deterministic unit tests for remaining invariants: boundary truncation (edgeGainsEnabled gating, GPU/CPU match with boundary processing disabled vs enabled)
 
 **Exit criterion**: GPU matches CPU reference within f16 tolerance on all validation plan test scenes.
 
