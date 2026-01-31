@@ -909,4 +909,306 @@ final class LICBenchmarkTests: XCTestCase {
         }
         print("")
     }
+
+    // MARK: - Bandwidth analysis
+
+    /// Determines whether the LIC kernel is ALU-bound, bandwidth-bound, or texture-latency-bound.
+    ///
+    /// Runs three diagnostic experiments:
+    /// 1. Resolution scaling (1080p/2K/4K, fixed L=30) — checks if ns/fetch is constant across pixel counts
+    /// 2. L-scaling (4K, L=5..50) — checks if ns/fetch changes with streamline length
+    /// 3. Cache efficiency (uniform vs vortex ratio) — measures texture cache impact of divergent streamlines
+    ///
+    /// Key metric: **nanoseconds per texture fetch** = GPU time / (pixels × fetches_per_pixel).
+    /// - Constant across resolutions + L values → texture unit at steady-state throughput
+    /// - Increases with L → cache pressure from longer streamlines
+    /// - Large uniform/vortex gap → texture-latency-bound (cache misses dominate)
+    func testBandwidthAnalysis() throws {
+        print("")
+        print("=== Bandwidth Analysis ===")
+        print("Device: \(device.name)")
+        if #available(macOS 13.0, *) {
+            print("Architecture: \(device.architecture.name)")
+        }
+        print("")
+
+        // --- Theoretical model ---
+
+        let defaultL: Float = 30.0
+        let defaultH: Float = 1.0
+        let defaultSteps = Int(round(defaultL / defaultH))
+
+        // Per step: 2 vector field samples (RK2) + 1 input sample = 3
+        // Total: center input (1) + 2 directions × steps × 3
+        let fetchesPerPixel = 1 + 2 * defaultSteps * 3  // 181 for L=30, h=1.0
+        let vectorFetchesPerPixel = 2 * defaultSteps * 2  // 120
+        let inputFetchesPerPixel = 1 + 2 * defaultSteps   // 61
+
+        // Bilinear filtering reads a 2×2 texel footprint.
+        // Vector field: rg32Float = 8 bytes/texel × 4 texels = 32 bytes/sample
+        // Input: r32Float = 4 bytes/texel × 4 texels = 16 bytes/sample
+        let bytesPerVectorFetch: Double = 32.0
+        let bytesPerInputFetch: Double = 16.0
+        let theoreticalBytesPerPixel =
+            Double(vectorFetchesPerPixel) * bytesPerVectorFetch +
+            Double(inputFetchesPerPixel) * bytesPerInputFetch +
+            2.0  // output write: r16Float
+
+        // Minimum bytes: read entire texture once (no re-reads, perfect cache).
+        // Vector field: W×H×8, Input: W×H×4, Output: W×H×2 → 14 bytes/pixel.
+        let minimumBytesPerPixel: Double = 14.0
+
+        print("--- Theoretical Model (L=\(Int(defaultL)), h=\(defaultH)) ---")
+        print("  Texture fetches per pixel:  \(fetchesPerPixel)  (\(vectorFetchesPerPixel) vector + \(inputFetchesPerPixel) input)")
+        print("  Bytes/fetch (no cache):     \(String(format: "%.1f", theoreticalBytesPerPixel / Double(fetchesPerPixel))) avg  (32B vector bilinear, 16B input bilinear)")
+        print("  Theoretical bytes/pixel:    \(Int(theoreticalBytesPerPixel)) B  (no-cache upper bound)")
+        print("  Minimum bytes/pixel:        \(Int(minimumBytesPerPixel)) B  (perfect cache: each texel read once)")
+        print("")
+
+        // --- 1. Resolution scaling ---
+
+        print("--- Resolution Scaling (L=\(Int(defaultL))) ---")
+        print("")
+
+        struct ResolutionResult {
+            let label: String
+            let width: Int
+            let height: Int
+            let fieldType: FieldType
+            let gpuMs: Double
+            let pixels: Int
+            let fetches: Int
+        }
+
+        let resolutions: [(label: String, w: Int, h: Int)] = [
+            ("1080p", 1920, 1080),
+            ("2K",    2048, 2048),
+            ("4K",    3840, 2160),
+        ]
+
+        var resResults: [ResolutionResult] = []
+
+        for (label, w, h) in resolutions {
+            for fieldType in [FieldType.uniform, FieldType.vortex] {
+                let fieldLabel = fieldType == .uniform ? "uniform" : "vortex"
+                let scenario = BenchmarkScenario(
+                    name: "\(label) \(fieldLabel)",
+                    width: w, height: h,
+                    fieldType: fieldType,
+                    L: defaultL, h: defaultH,
+                    warmUpCount: 5, measureCount: 20)
+                let result = try autoreleasepool { try runBenchmark(scenario) }
+                let ms = result.gpuTimingAvailable ? result.gpuMedian : result.wallMedian
+                let pixels = w * h
+                let fetches = pixels * fetchesPerPixel
+                resResults.append(ResolutionResult(
+                    label: "\(label) \(fieldLabel)",
+                    width: w, height: h,
+                    fieldType: fieldType,
+                    gpuMs: ms,
+                    pixels: pixels,
+                    fetches: fetches))
+            }
+        }
+
+        let resHeader = "\(pad("Scenario", 18)) \(lpad("Pixels", 10)) "
+            + "\(lpad("GPU ms", 9)) \(lpad("Gfetch/s", 9)) "
+            + "\(lpad("ns/px", 8)) \(lpad("GB/s*", 8))"
+        print(resHeader)
+        print(String(repeating: "\u{2500}", count: 66))
+
+        for r in resResults {
+            let gfetchPerSec = Double(r.fetches) / (r.gpuMs * 1e6)  // fetches/ns = Gfetch/s
+            let nsPerPixel = r.gpuMs * 1e6 / Double(r.pixels)
+            let gbps = Double(r.pixels) * theoreticalBytesPerPixel / (r.gpuMs * 1e6)  // bytes / ns = GB/s
+
+            let line = "\(pad(r.label, 18)) \(lpad(String(format: "%.1fM", Double(r.pixels) / 1e6), 10)) "
+                + "\(lpad(fmtMs(r.gpuMs), 9)) \(lpad(String(format: "%.1f", gfetchPerSec), 9)) "
+                + "\(lpad(String(format: "%.1f", nsPerPixel), 8)) \(lpad(String(format: "%.0f", gbps), 8))"
+            print(line)
+        }
+        print("  * GB/s = no-cache upper bound (assumes every bilinear fetch misses cache)")
+        print("    Real device bandwidth is ~200 GB/s (M1 Pro). Values >> peak confirm heavy cache reuse.")
+        print("")
+
+        // --- 2. L-scaling ---
+
+        print("--- L-Scaling at 4K (3840x2160) ---")
+        print("")
+
+        struct LScaleResult {
+            let L: Float
+            let steps: Int
+            let fetchesPerPixel: Int
+            let gpuMsUniform: Double
+            let gpuMsVortex: Double
+        }
+
+        let lValues: [Float] = [5, 10, 20, 30, 50]
+        var lResults: [LScaleResult] = []
+
+        for L in lValues {
+            let steps = Int(round(L / defaultH))
+            let fetches = 1 + 2 * steps * 3
+
+            var gpuByField: [FieldType: Double] = [:]
+            for fieldType in [FieldType.uniform, FieldType.vortex] {
+                let scenario = BenchmarkScenario(
+                    name: "4K L=\(Int(L))",
+                    width: 3840, height: 2160,
+                    fieldType: fieldType,
+                    L: L, h: defaultH,
+                    warmUpCount: 5, measureCount: 20)
+                let result = try autoreleasepool { try runBenchmark(scenario) }
+                gpuByField[fieldType] = result.gpuTimingAvailable ? result.gpuMedian : result.wallMedian
+            }
+
+            lResults.append(LScaleResult(
+                L: L,
+                steps: steps,
+                fetchesPerPixel: fetches,
+                gpuMsUniform: gpuByField[.uniform] ?? 0,
+                gpuMsVortex: gpuByField[.vortex] ?? 0))
+        }
+
+        let pixels4K = 3840 * 2160
+
+        let lHeader = "\(lpad("L", 4)) \(lpad("steps", 6)) \(lpad("fetch/px", 9)) "
+            + "\(lpad("GPU uni", 9)) \(lpad("GPU vtx", 9)) "
+            + "\(lpad("Gf/s uni", 9)) \(lpad("Gf/s vtx", 9)) "
+            + "\(lpad("vtx/uni", 8))"
+        print(lHeader)
+        print(String(repeating: "\u{2500}", count: 68))
+
+        for r in lResults {
+            let totalFetches = Double(pixels4K) * Double(r.fetchesPerPixel)
+            let gfsUniform = totalFetches / (r.gpuMsUniform * 1e6)
+            let gfsVortex = totalFetches / (r.gpuMsVortex * 1e6)
+            let ratio = r.gpuMsUniform > 0 ? r.gpuMsVortex / r.gpuMsUniform : 0
+
+            let line = "\(lpad("\(Int(r.L))", 4)) \(lpad("\(r.steps)", 6)) \(lpad("\(r.fetchesPerPixel)", 9)) "
+                + "\(lpad(fmtMs(r.gpuMsUniform), 9)) \(lpad(fmtMs(r.gpuMsVortex), 9)) "
+                + "\(lpad(String(format: "%.1f", gfsUniform), 9)) \(lpad(String(format: "%.1f", gfsVortex), 9)) "
+                + "\(lpad(String(format: "%.2fx", ratio), 8))"
+            print(line)
+        }
+        print("")
+
+        // --- 3. Cache efficiency summary ---
+
+        print("--- Cache Efficiency (vortex / uniform time ratio) ---")
+        print("")
+
+        let cacheHeader = "\(pad("Resolution", 12)) \(lpad("Uniform ms", 11)) \(lpad("Vortex ms", 11)) \(lpad("Ratio", 8))"
+        print(cacheHeader)
+        print(String(repeating: "\u{2500}", count: 45))
+
+        for (label, _, _) in resolutions {
+            let uniResult = resResults.first { $0.label == "\(label) uniform" }
+            let vtxResult = resResults.first { $0.label == "\(label) vortex" }
+            if let u = uniResult, let v = vtxResult {
+                let ratio = u.gpuMs > 0 ? v.gpuMs / u.gpuMs : 0
+                let line = "\(pad(label, 12)) \(lpad(fmtMs(u.gpuMs), 11)) \(lpad(fmtMs(v.gpuMs), 11)) \(lpad(String(format: "%.2fx", ratio), 8))"
+                print(line)
+            }
+        }
+        print("")
+
+        // --- 4. Automated interpretation ---
+
+        print("--- Interpretation ---")
+        print("")
+
+        // Check throughput stability across resolutions (uniform, best-case).
+        let uniformRes = resResults.filter { $0.fieldType == .uniform }
+        let gfsValues = uniformRes.map { r -> Double in
+            Double(r.fetches) / (r.gpuMs * 1e6)  // Gfetch/s
+        }
+        let gfsMin = gfsValues.min() ?? 1
+        let gfsMax = gfsValues.max() ?? 1
+        let gfsSpread = gfsMin > 0 ? (gfsMax - gfsMin) / gfsMin * 100 : 0
+
+        // Check L-scaling linearity (vortex, worst-case).
+        let baseL = lResults.first { Int($0.L) == 5 }
+        let maxL = lResults.first { Int($0.L) == 50 }
+        let fetchRatio = (baseL != nil && maxL != nil)
+            ? Double(maxL!.fetchesPerPixel) / Double(baseL!.fetchesPerPixel) : 10.0
+        let timeRatio = (baseL != nil && maxL != nil && baseL!.gpuMsVortex > 0)
+            ? maxL!.gpuMsVortex / baseL!.gpuMsVortex : 0
+
+        // Check cache gap.
+        let vtx4K = resResults.first { $0.label == "4K vortex" }?.gpuMs ?? 1
+        let uni4K = resResults.first { $0.label == "4K uniform" }?.gpuMs ?? 1
+        let cacheGap4K = uni4K > 0 ? vtx4K / uni4K : 0
+
+        // Gfetch/s trend across L (vortex) — dropping throughput = growing cache pressure.
+        let gfsL5Vtx = (baseL != nil && baseL!.gpuMsVortex > 0)
+            ? Double(pixels4K) * Double(baseL!.fetchesPerPixel) / (baseL!.gpuMsVortex * 1e6) : 0
+        let gfsL50Vtx = (maxL != nil && maxL!.gpuMsVortex > 0)
+            ? Double(pixels4K) * Double(maxL!.fetchesPerPixel) / (maxL!.gpuMsVortex * 1e6) : 0
+        let gfsDrop = gfsL5Vtx > 0 ? (gfsL5Vtx - gfsL50Vtx) / gfsL5Vtx * 100 : 0
+
+        // Resolution scaling: is throughput stable?
+        if gfsSpread < 15.0 {
+            print("  Resolution scaling: Gfetch/s varies \(String(format: "%.0f%%", gfsSpread)) across 1080p→4K (uniform).")
+            print("  -> Texture throughput is resolution-independent. Good.")
+        } else {
+            print("  Resolution scaling: Gfetch/s varies \(String(format: "%.0f%%", gfsSpread)) across 1080p→4K (uniform).")
+            print("  -> Throughput changes with resolution; possible memory bus saturation at higher res.")
+        }
+        print("")
+
+        // L-scaling.
+        let scalingEfficiency = fetchRatio > 0 ? timeRatio / fetchRatio : 0
+        print("  L-scaling (vortex): L=5→50, fetch count \(String(format: "%.1f", fetchRatio))x, GPU time \(String(format: "%.1f", timeRatio))x.")
+        print("  Scaling efficiency: \(String(format: "%.0f%%", scalingEfficiency * 100)) (100% = time scales perfectly with fetch count).")
+        if gfsDrop > 15 {
+            print("  Texture throughput drops \(String(format: "%.0f%%", gfsDrop)) from L=5 to L=50 → cache pressure increases with streamline length.")
+        } else if gfsDrop < -10 {
+            print("  Texture throughput increases \(String(format: "%.0f%%", abs(gfsDrop))) — short kernels underutilize the texture unit.")
+        } else {
+            print("  Texture throughput is stable across L values → per-fetch cost is constant.")
+        }
+        print("")
+
+        // Cache gap → bottleneck determination.
+        if cacheGap4K < 1.15 {
+            print("  Cache efficiency: vortex/uniform ratio = \(String(format: "%.2f", cacheGap4K))x at 4K.")
+            print("  -> Minimal cache impact. Kernel is BANDWIDTH-BOUND.")
+            print("  -> Streamline divergence does not significantly increase cost.")
+            print("  Recommendations:")
+            print("    1. Evaluate format tightening: rg16Float vector field (halves vector bandwidth)")
+            print("    2. Evaluate r16Float input (halves input bandwidth, quality validation needed)")
+            print("    3. Check if texture compression (ASTC) is viable for input")
+        } else if cacheGap4K < 1.5 {
+            print("  Cache efficiency: vortex/uniform ratio = \(String(format: "%.2f", cacheGap4K))x at 4K.")
+            print("  -> Moderate cache impact. Kernel is MIXED bandwidth + texture-latency.")
+            print("  Recommendations:")
+            print("    1. Format tightening may help (smaller texels → more fit in cache lines)")
+            print("    2. Consider spatial reordering of threadgroups to improve coherence")
+        } else {
+            print("  Cache efficiency: vortex/uniform ratio = \(String(format: "%.2f", cacheGap4K))x at 4K.")
+            print("  -> Large cache gap. Kernel is TEXTURE-LATENCY BOUND on divergent fields.")
+            print("  -> Divergent streamlines cause cache misses; each dependent fetch stalls.")
+            print("  Recommendations:")
+            print("    1. Format tightening helps (smaller texels → less bandwidth per cache miss)")
+            print("    2. Current 32x32 threadgroups already maximize latency hiding")
+            print("    3. On uniform/coherent fields, kernel runs near peak — no action needed")
+            print("    4. Divergent-field cost is inherent to the algorithm (dependent texture chain)")
+        }
+        print("")
+
+        // Final bandwidth number.
+        let achievedGbps4KVtx = Double(pixels4K) * theoreticalBytesPerPixel / (vtx4K * 1e6)
+        let achievedGbps4KUni = Double(pixels4K) * theoreticalBytesPerPixel / (uni4K * 1e6)
+        let minGbps4KVtx = Double(pixels4K) * minimumBytesPerPixel / (vtx4K * 1e6)
+        let minGbps4KUni = Double(pixels4K) * minimumBytesPerPixel / (uni4K * 1e6)
+
+        print("  Achieved bandwidth at 4K (no-cache model):")
+        print("    Uniform: \(String(format: "%.1f", achievedGbps4KUni)) GB/s    Vortex: \(String(format: "%.1f", achievedGbps4KVtx)) GB/s")
+        print("  Achieved bandwidth at 4K (perfect-cache model):")
+        print("    Uniform: \(String(format: "%.1f", minGbps4KUni)) GB/s    Vortex: \(String(format: "%.1f", minGbps4KVtx)) GB/s")
+        print("  (Device peak bandwidth is typically 100-400 GB/s for Apple Silicon)")
+        print("")
+    }
 }

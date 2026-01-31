@@ -34,7 +34,7 @@
 - [x] Profile on M1 Pro at 2K and 4K
 - [x] Threadgroup size tuning (start 8×8 / 16×16, measure)
 - [x] Occupancy & register pressure analysis — all 8 pipeline variants at maxThreads=1024 (100% occupancy); no register pressure. 82% threadgroup-size spread confirms kernel is texture-latency bound, not register-limited. 32×32 threadgroups optimal. No register reduction needed.
-- [ ] Bandwidth analysis — GPU capture → check ALU-bound vs memory-bound limiter at 4K; if bandwidth-limited, evaluate access pattern coherence and format tightening
+- [x] Bandwidth analysis — Resolution scaling (1080p/2K/4K) + L-scaling (L=5..50) + cache efficiency (uniform vs vortex). 93 Gfetch/s uniform throughput is constant across resolutions (not bus-saturated). Vortex/uniform ratio 1.25–1.33× with throughput dropping 18% from L=5→50 on vortex fields. No-cache model shows 2478 GB/s (12× M1 Pro peak) confirming >90% cache reuse. Verdict: MIXED texture-latency + moderate cache pressure on divergent fields; NOT bandwidth-bound. Format tightening would improve cache efficiency; divergent-field penalty is inherent to dependent texture fetch chains.
 - [x] Resource reuse — all 4 production pipeline variants (mask × edgeGains) pre-built at init; threadgroup sizes cached per-pipeline; samplers and dummy mask already at init; params/weights use setBytes (correct for <4KB data). No per-frame allocation in the dispatch path.
 - [ ] Multiple in-flight command buffers
 - [ ] Warm-up dispatch
