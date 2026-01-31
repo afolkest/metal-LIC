@@ -209,6 +209,10 @@ public final class LICEncoder {
     ///
     /// Mask semantics apply per pass: starting-pixel masked pixels return
     /// `full_sum * center_sample` each pass.
+    /// - Parameter pingPongTextures: Optional externally-owned ping-pong textures
+    ///   for multi-pass. When non-nil, these are used instead of the encoder's
+    ///   internal textures — required for safe multi-buffered dispatch where
+    ///   multiple command buffers may be in flight simultaneously.
     public func encodeMultiPass(
         commandBuffer: MTLCommandBuffer,
         params: LicParams,
@@ -219,7 +223,8 @@ public final class LICEncoder {
         maskTexture: MTLTexture? = nil,
         config: LICPipelineConfig = LICPipelineConfig(),
         iterations: Int = 1,
-        threadgroupSize: MTLSize? = nil
+        threadgroupSize: MTLSize? = nil,
+        pingPongTextures: (MTLTexture, MTLTexture)? = nil
     ) throws {
         precondition(iterations >= 1, "iterations must be >= 1")
 
@@ -233,11 +238,20 @@ public final class LICEncoder {
             return
         }
 
-        let w = outputTexture.width
-        let h = outputTexture.height
-        try ensurePingPongTextures(width: w, height: h)
-        guard let ping = pingTexture, let pong = pongTexture else {
-            throw LICError.textureCreationFailed
+        let ping: MTLTexture
+        let pong: MTLTexture
+        if let external = pingPongTextures {
+            ping = external.0
+            pong = external.1
+        } else {
+            let w = outputTexture.width
+            let h = outputTexture.height
+            try ensurePingPongTextures(width: w, height: h)
+            guard let p = pingTexture, let pp = pongTexture else {
+                throw LICError.textureCreationFailed
+            }
+            ping = p
+            pong = pp
         }
 
         let pingPong = [ping, pong]

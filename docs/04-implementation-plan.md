@@ -36,8 +36,8 @@
 - [x] Occupancy & register pressure analysis — all 8 pipeline variants at maxThreads=1024 (100% occupancy); no register pressure. 82% threadgroup-size spread confirms kernel is texture-latency bound, not register-limited. 32×32 threadgroups optimal. No register reduction needed.
 - [x] Bandwidth analysis — Resolution scaling (1080p/2K/4K) + L-scaling (L=5..50) + cache efficiency (uniform vs vortex). 93 Gfetch/s uniform throughput is constant across resolutions (not bus-saturated). Vortex/uniform ratio 1.25–1.33× with throughput dropping 18% from L=5→50 on vortex fields. No-cache model shows 2478 GB/s (12× M1 Pro peak) confirming >90% cache reuse. Verdict: MIXED texture-latency + moderate cache pressure on divergent fields; NOT bandwidth-bound. Format tightening would improve cache efficiency; divergent-field penalty is inherent to dependent texture fetch chains.
 - [x] Resource reuse — all 4 production pipeline variants (mask × edgeGains) pre-built at init; threadgroup sizes cached per-pipeline; samplers and dummy mask already at init; params/weights use setBytes (correct for <4KB data). No per-frame allocation in the dispatch path.
-- [ ] Multiple in-flight command buffers
-- [ ] Warm-up dispatch
+- [x] Multiple in-flight command buffers — `LICDispatcher` with semaphore-based pipelining (maxInFlight=3 default), per-frame ping-pong texture pools for multi-pass isolation, completion callbacks for GPU timing. `LICEncoder.encodeMultiPass` extended with optional `pingPongTextures` parameter for safe concurrent dispatch.
+- [x] Warm-up dispatch — `LICDispatcher.warmUp()` primes GPU caches, TLB entries, and driver state with a synchronous single-frame dispatch before the real-time loop.
 - [ ] bryLIC parity checks (SSIM, histogram distance, error heatmaps — advisory only)
 
 **Exit criterion**: 2K@60fps or 4K@~30fps on M1 Pro with default params (L=30, h=1.0, 1 iteration).

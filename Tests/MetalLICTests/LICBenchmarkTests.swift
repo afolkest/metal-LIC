@@ -175,6 +175,241 @@ final class LICBenchmarkTests: XCTestCase {
         printReport(result)
     }
 
+    // MARK: - Pipelined throughput
+
+    /// Measures sustained throughput with multiple in-flight command buffers
+    /// vs the serial baseline. Reports FPS improvement from pipelining.
+    func testBenchmark_pipelined_2K_vortex() throws {
+        let width = 2048, height = 2048
+        let L: Float = 30, h: Float = 1.0
+        let maxInFlight = 3
+        let warmUpCount = 5
+        let measureCount = 30
+
+        let (params, weights) = try LICKernel.build(L: L, h: h)
+        let config = LICPipelineConfig()
+        let textures = try prepareTextures(
+            width: width, height: height, fieldType: .vortex)
+
+        // --- Serial baseline (existing pattern) ---
+
+        let serialScenario = BenchmarkScenario(
+            name: "2K vortex (serial)",
+            width: width, height: height,
+            fieldType: .vortex, L: L, h: h,
+            warmUpCount: warmUpCount, measureCount: measureCount,
+            targetFPS: 60)
+        let serialResult = try runBenchmark(serialScenario)
+
+        // --- Pipelined measurement ---
+
+        let dispatcher = LICDispatcher(
+            encoder: encoder, commandQueue: commandQueue,
+            maxInFlight: maxInFlight)
+
+        // Create per-frame output textures (distinct to avoid write hazards).
+        let outputTextures = try (0..<maxInFlight).map { _ in
+            try makePrivateTexture(
+                format: .r16Float, width: width, height: height,
+                usage: [.shaderRead, .shaderWrite])
+        }
+
+        // Warm-up.
+        try dispatcher.warmUp(
+            params: params, kernelWeights: weights,
+            inputTexture: textures.input,
+            vectorField: textures.vectorField,
+            outputTexture: outputTextures[0],
+            config: config)
+
+        // Additional warm-up dispatches to stabilize.
+        for i in 0..<warmUpCount {
+            try dispatcher.dispatch(
+                params: params, kernelWeights: weights,
+                inputTexture: textures.input,
+                vectorField: textures.vectorField,
+                outputTexture: outputTextures[i % maxInFlight],
+                config: config)
+        }
+        dispatcher.waitForAllFrames()
+
+        // Measurement: dispatch all frames, collect GPU times from callbacks.
+        var gpuTimes: [Double] = []
+        let lock = NSLock()
+
+        let wallStart = CFAbsoluteTimeGetCurrent()
+
+        for i in 0..<measureCount {
+            try dispatcher.dispatch(
+                params: params, kernelWeights: weights,
+                inputTexture: textures.input,
+                vectorField: textures.vectorField,
+                outputTexture: outputTextures[i % maxInFlight],
+                config: config) { cb in
+                    if cb.status == .completed {
+                        let gpuMs = (cb.gpuEndTime - cb.gpuStartTime) * 1000.0
+                        lock.lock()
+                        gpuTimes.append(gpuMs)
+                        lock.unlock()
+                    }
+                }
+        }
+        dispatcher.waitForAllFrames()
+
+        let wallEnd = CFAbsoluteTimeGetCurrent()
+        let totalWallMs = (wallEnd - wallStart) * 1000.0
+        let sustainedFPS = Double(measureCount) / (totalWallMs / 1000.0)
+
+        // --- Report ---
+
+        gpuTimes.sort()
+        let gpuMedian = !gpuTimes.isEmpty
+            ? gpuTimes[gpuTimes.count / 2] : 0
+        let gpuMean = !gpuTimes.isEmpty
+            ? gpuTimes.reduce(0, +) / Double(gpuTimes.count) : 0
+
+        let serialWallMs = serialResult.wallMedian
+        let serialWallFPS = serialWallMs > 0 ? 1000.0 / serialWallMs : 0
+        let improvement = serialWallFPS > 0
+            ? (sustainedFPS - serialWallFPS) / serialWallFPS * 100 : 0
+
+        print("")
+        print("=== Pipelined Throughput: 2K vortex ===")
+        print("Device:       \(device.name)")
+        print("Resolution:   \(width)x\(height)")
+        print("Params:       L=\(Int(L)) h=\(h)")
+        print("In-flight:    \(maxInFlight)")
+        print("Frames:       \(warmUpCount) warm-up + \(measureCount) measured")
+        print("")
+        print("Serial baseline (wall-clock):")
+        print("  Wall median: \(fmtMs(serialWallMs))")
+        print("  FPS:         \(String(format: "%.1f", serialWallFPS))")
+        print("")
+        print("Pipelined:")
+        print("  GPU median: \(fmtMs(gpuMedian))")
+        print("  GPU mean:   \(fmtMs(gpuMean))")
+        print("  Wall total: \(fmtMs(totalWallMs))  (\(measureCount) frames)")
+        print("  Sustained:  \(String(format: "%.1f", sustainedFPS)) FPS")
+        print("")
+        print("Improvement:  \(String(format: "%+.1f%%", improvement))")
+        print("  (Improvement reflects reduced CPU-GPU sync stalls.")
+        print("   Gains are larger when encode time is significant vs GPU time.)")
+        print("")
+    }
+
+    func testBenchmark_pipelined_2K_vortex_3pass() throws {
+        let width = 2048, height = 2048
+        let L: Float = 30, h: Float = 1.0
+        let iterations = 3
+        let maxInFlight = 3
+        let warmUpCount = 5
+        let measureCount = 30
+
+        let (params, weights) = try LICKernel.build(L: L, h: h)
+        let config = LICPipelineConfig()
+        let textures = try prepareTextures(
+            width: width, height: height, fieldType: .vortex)
+
+        // --- Serial baseline ---
+
+        let serialScenario = BenchmarkScenario(
+            name: "2K vortex 3-pass (serial)",
+            width: width, height: height,
+            fieldType: .vortex, L: L, h: h,
+            iterations: iterations,
+            warmUpCount: warmUpCount, measureCount: measureCount)
+        let serialResult = try runBenchmark(serialScenario)
+
+        // --- Pipelined measurement ---
+
+        let dispatcher = LICDispatcher(
+            encoder: encoder, commandQueue: commandQueue,
+            maxInFlight: maxInFlight)
+
+        let outputTextures = try (0..<maxInFlight).map { _ in
+            try makePrivateTexture(
+                format: .r16Float, width: width, height: height,
+                usage: [.shaderRead, .shaderWrite])
+        }
+
+        try dispatcher.warmUp(
+            params: params, kernelWeights: weights,
+            inputTexture: textures.input,
+            vectorField: textures.vectorField,
+            outputTexture: outputTextures[0],
+            config: config, iterations: iterations)
+
+        for i in 0..<warmUpCount {
+            try dispatcher.dispatch(
+                params: params, kernelWeights: weights,
+                inputTexture: textures.input,
+                vectorField: textures.vectorField,
+                outputTexture: outputTextures[i % maxInFlight],
+                config: config, iterations: iterations)
+        }
+        dispatcher.waitForAllFrames()
+
+        var gpuTimes: [Double] = []
+        let lock = NSLock()
+
+        let wallStart = CFAbsoluteTimeGetCurrent()
+
+        for i in 0..<measureCount {
+            try dispatcher.dispatch(
+                params: params, kernelWeights: weights,
+                inputTexture: textures.input,
+                vectorField: textures.vectorField,
+                outputTexture: outputTextures[i % maxInFlight],
+                config: config, iterations: iterations) { cb in
+                    if cb.status == .completed {
+                        let gpuMs = (cb.gpuEndTime - cb.gpuStartTime) * 1000.0
+                        lock.lock()
+                        gpuTimes.append(gpuMs)
+                        lock.unlock()
+                    }
+                }
+        }
+        dispatcher.waitForAllFrames()
+
+        let wallEnd = CFAbsoluteTimeGetCurrent()
+        let totalWallMs = (wallEnd - wallStart) * 1000.0
+        let sustainedFPS = Double(measureCount) / (totalWallMs / 1000.0)
+
+        gpuTimes.sort()
+        let gpuMedian = !gpuTimes.isEmpty
+            ? gpuTimes[gpuTimes.count / 2] : 0
+        let gpuMean = !gpuTimes.isEmpty
+            ? gpuTimes.reduce(0, +) / Double(gpuTimes.count) : 0
+
+        let serialWallMs = serialResult.wallMedian
+        let serialWallFPS = serialWallMs > 0 ? 1000.0 / serialWallMs : 0
+        let improvement = serialWallFPS > 0
+            ? (sustainedFPS - serialWallFPS) / serialWallFPS * 100 : 0
+
+        print("")
+        print("=== Pipelined Throughput: 2K vortex 3-pass ===")
+        print("Device:       \(device.name)")
+        print("Resolution:   \(width)x\(height)")
+        print("Params:       L=\(Int(L)) h=\(h) iterations=\(iterations)")
+        print("In-flight:    \(maxInFlight)")
+        print("Frames:       \(warmUpCount) warm-up + \(measureCount) measured")
+        print("")
+        print("Serial baseline (wall-clock):")
+        print("  Wall median: \(fmtMs(serialWallMs))")
+        print("  FPS:         \(String(format: "%.1f", serialWallFPS))")
+        print("")
+        print("Pipelined:")
+        print("  GPU median: \(fmtMs(gpuMedian))")
+        print("  GPU mean:   \(fmtMs(gpuMean))")
+        print("  Wall total: \(fmtMs(totalWallMs))  (\(measureCount) frames)")
+        print("  Sustained:  \(String(format: "%.1f", sustainedFPS)) FPS")
+        print("")
+        print("Improvement:  \(String(format: "%+.1f%%", improvement))")
+        print("  (Multi-pass benefits more from pipelining: CPU encodes N passes")
+        print("   while GPU executes previous frame's N passes.)")
+        print("")
+    }
+
     // MARK: - Threadgroup size sweep
 
     /// Threadgroup sizes to test. Apple Silicon SIMD width is 32 threads,
