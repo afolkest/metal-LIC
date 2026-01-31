@@ -24,8 +24,9 @@ public final class LICEncoder {
 
     public let device: MTLDevice
 
-    // Cached pipeline states keyed by configuration.
+    // Cached pipeline states and threadgroup sizes keyed by configuration.
     private var pipelines: [LICPipelineConfig: MTLComputePipelineState] = [:]
+    private var threadgroupSizes: [LICPipelineConfig: MTLSize] = [:]
     private let library: MTLLibrary
 
     // Samplers (Section 4.2)
@@ -80,8 +81,14 @@ public final class LICEncoder {
                      bytesPerRow: 1)
         self.dummyMask = mask
 
-        // --- Build default pipeline (no mask, no edge gains, no debug) ---
-        try buildPipeline(for: LICPipelineConfig())
+        // --- Pre-build all production pipeline variants (debug=0) ---
+        // Eliminates pipeline compilation stalls during the render loop.
+        for mask in [false, true] {
+            for edgeGains in [false, true] {
+                try buildPipeline(for: LICPipelineConfig(
+                    maskEnabled: mask, edgeGainsEnabled: edgeGains))
+            }
+        }
     }
 
     // MARK: - Pipeline management
@@ -103,6 +110,7 @@ public final class LICEncoder {
                                                 constantValues: constants)
         let pipeline = try device.makeComputePipelineState(function: function)
         pipelines[config] = pipeline
+        threadgroupSizes[config] = LICEncoder.defaultThreadgroupSize(for: pipeline)
         return pipeline
     }
 
@@ -172,7 +180,7 @@ public final class LICEncoder {
         // --- Dispatch ---
         let w = outputTexture.width
         let h = outputTexture.height
-        let tgSize = threadgroupSize ?? LICEncoder.defaultThreadgroupSize(for: pipeline)
+        let tgSize = threadgroupSize ?? threadgroupSizes[config]!
         let gridSize = MTLSize(width: w, height: h, depth: 1)
         encoder.dispatchThreads(gridSize, threadsPerThreadgroup: tgSize)
 

@@ -35,7 +35,7 @@
 - [x] Threadgroup size tuning (start 8×8 / 16×16, measure)
 - [x] Occupancy & register pressure analysis — all 8 pipeline variants at maxThreads=1024 (100% occupancy); no register pressure. 82% threadgroup-size spread confirms kernel is texture-latency bound, not register-limited. 32×32 threadgroups optimal. No register reduction needed.
 - [ ] Bandwidth analysis — GPU capture → check ALU-bound vs memory-bound limiter at 4K; if bandwidth-limited, evaluate access pattern coherence and format tightening
-- [ ] Resource reuse — precreated pipelines, samplers, buffers; no per-frame allocation
+- [x] Resource reuse — all 4 production pipeline variants (mask × edgeGains) pre-built at init; threadgroup sizes cached per-pipeline; samplers and dummy mask already at init; params/weights use setBytes (correct for <4KB data). No per-frame allocation in the dispatch path.
 - [ ] Multiple in-flight command buffers
 - [ ] Warm-up dispatch
 - [ ] bryLIC parity checks (SSIM, histogram distance, error heatmaps — advisory only)
