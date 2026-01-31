@@ -31,7 +31,7 @@
 
 ## M3: Performance + polish
 
-- [ ] Profile on M1 Pro at 2K and 4K
+- [x] Profile on M1 Pro at 2K and 4K
 - [ ] Threadgroup size tuning (start 8×8 / 16×16, measure)
 - [ ] Occupancy & register pressure analysis — GPU capture → shader profiler; check max concurrent threads; reduce live registers if occupancy is low (split loops, reduce temporaries)
 - [ ] Bandwidth analysis — GPU capture → check ALU-bound vs memory-bound limiter at 4K; if bandwidth-limited, evaluate access pattern coherence and format tightening
