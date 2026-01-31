@@ -51,6 +51,7 @@ final class LICBenchmarkTests: XCTestCase {
         let warmUpCount: Int
         let measureCount: Int
         let targetFPS: Double?
+        let threadgroupSize: MTLSize?
 
         init(name: String,
              width: Int, height: Int,
@@ -58,7 +59,8 @@ final class LICBenchmarkTests: XCTestCase {
              L: Float = 30, h: Float = 1.0,
              iterations: Int = 1,
              warmUpCount: Int = 5, measureCount: Int = 20,
-             targetFPS: Double? = nil) {
+             targetFPS: Double? = nil,
+             threadgroupSize: MTLSize? = nil) {
             self.name = name
             self.width = width
             self.height = height
@@ -69,9 +71,15 @@ final class LICBenchmarkTests: XCTestCase {
             self.warmUpCount = warmUpCount
             self.measureCount = measureCount
             self.targetFPS = targetFPS
+            self.threadgroupSize = threadgroupSize
         }
 
         var resolutionLabel: String { "\(width)x\(height)" }
+
+        var threadgroupLabel: String {
+            guard let tg = threadgroupSize else { return "default" }
+            return "\(tg.width)x\(tg.height)"
+        }
     }
 
     struct FrameTiming {
@@ -165,6 +173,135 @@ final class LICBenchmarkTests: XCTestCase {
             fieldType: .vortex,
             iterations: 3))
         printReport(result)
+    }
+
+    // MARK: - Threadgroup size sweep
+
+    /// Threadgroup sizes to test. Apple Silicon SIMD width is 32 threads,
+    /// so all candidates are multiples of 32 for full SIMD utilization.
+    private static let threadgroupCandidates: [(w: Int, h: Int)] = [
+        (8, 4),     // 32 — 1 SIMD group, wide
+        (4, 8),     // 32 — 1 SIMD group, tall
+        (8, 8),     // 64 — 2 SIMD groups (current default)
+        (16, 4),    // 64 — 2 SIMD groups, wide
+        (16, 8),    // 128 — 4 SIMD groups
+        (8, 16),    // 128 — 4 SIMD groups, tall
+        (16, 16),   // 256 — 8 SIMD groups
+        (32, 4),    // 128 — 4 SIMD groups, very wide
+        (32, 8),    // 256 — 8 SIMD groups, wide
+        (32, 16),   // 512 — 16 SIMD groups
+        (32, 32),   // 1024 — max typical
+    ]
+
+    func testThreadgroupSweep_2K_vortex() throws {
+        try runThreadgroupSweep(
+            label: "2K vortex",
+            width: 2048, height: 2048,
+            fieldType: .vortex)
+    }
+
+    func testThreadgroupSweep_4K_vortex() throws {
+        try runThreadgroupSweep(
+            label: "4K vortex",
+            width: 3840, height: 2160,
+            fieldType: .vortex)
+    }
+
+    func testThreadgroupSweep_2K_uniform() throws {
+        try runThreadgroupSweep(
+            label: "2K uniform",
+            width: 2048, height: 2048,
+            fieldType: .uniform)
+    }
+
+    func testThreadgroupSweep_4K_uniform() throws {
+        try runThreadgroupSweep(
+            label: "4K uniform",
+            width: 3840, height: 2160,
+            fieldType: .uniform)
+    }
+
+    private func runThreadgroupSweep(
+        label: String,
+        width: Int, height: Int,
+        fieldType: FieldType
+    ) throws {
+        let config = LICPipelineConfig()
+        let pipeline = try encoder.buildPipeline(for: config)
+        let maxThreads = pipeline.maxTotalThreadsPerThreadgroup
+        let simdWidth = pipeline.threadExecutionWidth
+
+        print("")
+        print("=== Threadgroup Sweep: \(label) ===")
+        print("Device:     \(device.name)")
+        print("Resolution: \(width)x\(height)")
+        print("SIMD width: \(simdWidth)")
+        print("Max threads/threadgroup: \(maxThreads)")
+        print("")
+
+        // Filter candidates that exceed hardware limit.
+        let validCandidates = Self.threadgroupCandidates.filter {
+            $0.w * $0.h <= maxThreads
+        }
+
+        var results: [BenchmarkResult] = []
+        for (tw, th) in validCandidates {
+            let tgSize = MTLSize(width: tw, height: th, depth: 1)
+            let scenario = BenchmarkScenario(
+                name: "\(tw)x\(th) (\(tw * th))",
+                width: width, height: height,
+                fieldType: fieldType,
+                warmUpCount: 5, measureCount: 20,
+                threadgroupSize: tgSize)
+            let result = try autoreleasepool {
+                try runBenchmark(scenario)
+            }
+            results.append(result)
+        }
+
+        printThreadgroupSweepTable(results, simdWidth: simdWidth)
+    }
+
+    private func printThreadgroupSweepTable(_ results: [BenchmarkResult],
+                                            simdWidth: Int) {
+        guard let best = results.min(by: {
+            let a = $0.gpuTimingAvailable ? $0.gpuMedian : $0.wallMedian
+            let b = $1.gpuTimingAvailable ? $1.gpuMedian : $1.wallMedian
+            return a < b
+        }) else { return }
+
+        let bestMs = best.gpuTimingAvailable ? best.gpuMedian : best.wallMedian
+
+        let header = "\(pad("Threadgroup", 16)) \(lpad("Threads", 8)) "
+            + "\(lpad("SIMDs", 6)) "
+            + "\(lpad("GPU med", 9)) \(lpad("GPU p95", 9)) "
+            + "\(lpad("CV", 6)) "
+            + "\(lpad("FPS", 7))   vs best"
+        print(header)
+        print(String(repeating: "\u{2500}", count: 80))
+
+        for r in results {
+            guard let tg = r.scenario.threadgroupSize else { continue }
+            let threads = tg.width * tg.height
+            let simds = threads / simdWidth
+            let medMs = r.gpuTimingAvailable ? r.gpuMedian : r.wallMedian
+            let p95Ms = r.gpuTimingAvailable ? r.gpuP95 : r.wallMedian
+            let cvStr = r.gpuTimingAvailable
+                ? String(format: "%.1f%%", r.gpuCV * 100) : "--"
+            let fpsVal = medMs > 0 ? 1000.0 / medMs : 0
+            let delta = bestMs > 0
+                ? String(format: "%+.1f%%", (medMs - bestMs) / bestMs * 100)
+                : "--"
+            let marker = medMs <= bestMs * 1.001 ? " <-- BEST" : ""
+
+            let line = "\(pad(r.scenario.threadgroupLabel, 16)) \(lpad("\(threads)", 8)) "
+                + "\(lpad("\(simds)", 6)) "
+                + "\(lpad(fmtMs(medMs), 9)) \(lpad(fmtMs(p95Ms), 9)) "
+                + "\(lpad(cvStr, 6)) "
+                + "\(lpad(String(format: "%.1f", fpsVal), 7))   \(delta)\(marker)"
+            print(line)
+        }
+        print("")
     }
 
     func testBenchmark_summary() throws {
@@ -261,7 +398,8 @@ final class LICBenchmarkTests: XCTestCase {
                 inputTexture: textures.input,
                 vectorField: textures.vectorField,
                 outputTexture: textures.output,
-                config: config)
+                config: config,
+                threadgroupSize: scenario.threadgroupSize)
         } else {
             try encoder.encodeMultiPass(
                 commandBuffer: cb,
@@ -270,7 +408,8 @@ final class LICBenchmarkTests: XCTestCase {
                 vectorField: textures.vectorField,
                 outputTexture: textures.output,
                 config: config,
-                iterations: scenario.iterations)
+                iterations: scenario.iterations,
+                threadgroupSize: scenario.threadgroupSize)
         }
     }
 
@@ -425,7 +564,9 @@ final class LICBenchmarkTests: XCTestCase {
         let gpuAvailable = !gpuTimes.isEmpty && gpuTimes[0] > 0
         let n = Double(max(gpuTimes.count, 1))
         let mean = gpuTimes.reduce(0, +) / n
-        let variance = gpuTimes.reduce(0.0) { $0 + ($1 - mean) * ($1 - mean) } / n
+        let variance = gpuTimes.count > 1
+            ? gpuTimes.reduce(0.0) { $0 + ($1 - mean) * ($1 - mean) } / (n - 1)
+            : 0.0
         let cv = mean > 0 ? sqrt(variance) / mean : 0
 
         return BenchmarkResult(

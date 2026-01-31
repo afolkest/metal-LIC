@@ -286,7 +286,7 @@ Given identical inputs and parameters, output must be deterministic.
 - Prefer GPU noise animation (procedural or small seed updates) over full texture uploads.
 - CPU-provided textures are acceptable for simple use, but avoid per-frame full-size uploads for real-time.
 - Run a warm-up dispatch at startup to avoid first-frame timing spikes.
-- Tune threadgroup size with profiling; start with 8x8 or 16x16.
+- Threadgroup size: use the largest square that fits `maxTotalThreadsPerThreadgroup` (32×32 = 1024 on M1 Pro). Larger threadgroups hide texture-fetch latency from divergent streamlines; measured 39–65% faster than 8×8 on vortex fields. Uniform fields are bandwidth-limited and insensitive to threadgroup size.
 - Use function constants to eliminate dead code paths (mask, edge gains, debug) at compile time; cache specialized pipelines.
 - Profile occupancy and register pressure via GPU capture; reduce live registers if occupancy is low.
 - Check ALU-bound vs memory-bound limiter at 4K; streamline walks diverge and may stress texture cache.

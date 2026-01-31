@@ -119,6 +119,7 @@ public final class LICEncoder {
     ///   - outputTexture: `r16Float` output texture.
     ///   - maskTexture: Optional `r8Uint` mask. Pass nil when masking is disabled.
     ///   - config: Pipeline configuration (determines which specialized variant to use).
+    ///   - threadgroupSize: Compute threadgroup dimensions. Pass nil to use the default (largest square fitting `maxTotalThreadsPerThreadgroup`, typically 32×32).
     public func encode(
         commandBuffer: MTLCommandBuffer,
         params: LicParams,
@@ -127,7 +128,8 @@ public final class LICEncoder {
         vectorField: MTLTexture,
         outputTexture: MTLTexture,
         maskTexture: MTLTexture? = nil,
-        config: LICPipelineConfig = LICPipelineConfig()
+        config: LICPipelineConfig = LICPipelineConfig(),
+        threadgroupSize: MTLSize? = nil
     ) throws {
         guard let pipeline = pipelines[config] else {
             throw LICError.pipelineNotBuilt(config)
@@ -157,20 +159,35 @@ public final class LICEncoder {
         guard !kernelWeights.isEmpty else {
             throw LICError.emptyKernelWeights
         }
+        let weightsByteCount = kernelWeights.count * MemoryLayout<Float>.stride
+        guard weightsByteCount <= 4096 else {
+            throw LICError.kernelWeightsTooLarge(byteCount: weightsByteCount)
+        }
         kernelWeights.withUnsafeBufferPointer { ptr in
             encoder.setBytes(ptr.baseAddress!,
-                             length: ptr.count * MemoryLayout<Float>.stride,
+                             length: weightsByteCount,
                              index: 1)
         }
 
         // --- Dispatch ---
         let w = outputTexture.width
         let h = outputTexture.height
-        let threadgroupSize = MTLSize(width: 8, height: 8, depth: 1)
+        let tgSize = threadgroupSize ?? LICEncoder.defaultThreadgroupSize(for: pipeline)
         let gridSize = MTLSize(width: w, height: h, depth: 1)
-        encoder.dispatchThreads(gridSize, threadsPerThreadgroup: threadgroupSize)
+        encoder.dispatchThreads(gridSize, threadsPerThreadgroup: tgSize)
 
         encoder.endEncoding()
+    }
+
+    /// Returns the largest square threadgroup that fits within the pipeline's limit.
+    /// Maximizing occupancy hides texture-fetch latency in the integration loop.
+    static func defaultThreadgroupSize(for pipeline: MTLComputePipelineState) -> MTLSize {
+        let maxThreads = pipeline.maxTotalThreadsPerThreadgroup
+        var side = 1
+        while (side * 2) * (side * 2) <= maxThreads {
+            side *= 2
+        }
+        return MTLSize(width: side, height: side, depth: 1)
     }
 
     // MARK: - Multi-pass
@@ -193,7 +210,8 @@ public final class LICEncoder {
         outputTexture: MTLTexture,
         maskTexture: MTLTexture? = nil,
         config: LICPipelineConfig = LICPipelineConfig(),
-        iterations: Int = 1
+        iterations: Int = 1,
+        threadgroupSize: MTLSize? = nil
     ) throws {
         precondition(iterations >= 1, "iterations must be >= 1")
 
@@ -203,7 +221,7 @@ public final class LICEncoder {
                 params: params, kernelWeights: kernelWeights,
                 inputTexture: inputTexture, vectorField: vectorField,
                 outputTexture: outputTexture, maskTexture: maskTexture,
-                config: config)
+                config: config, threadgroupSize: threadgroupSize)
             return
         }
 
@@ -232,7 +250,7 @@ public final class LICEncoder {
                 params: params, kernelWeights: kernelWeights,
                 inputTexture: previousOutput, vectorField: vectorField,
                 outputTexture: passOutput, maskTexture: maskTexture,
-                config: config)
+                config: config, threadgroupSize: threadgroupSize)
 
             previousOutput = passOutput
         }
@@ -306,4 +324,5 @@ public enum LICError: Error {
     case encoderCreationFailed
     case pipelineNotBuilt(LICPipelineConfig)
     case emptyKernelWeights
+    case kernelWeightsTooLarge(byteCount: Int)
 }
