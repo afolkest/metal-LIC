@@ -692,4 +692,221 @@ final class LICBenchmarkTests: XCTestCase {
     private func fmtMs(_ ms: Double) -> String {
         String(format: "%.2fms", ms)
     }
+
+    // MARK: - Occupancy & register pressure analysis
+
+    /// Queries Metal pipeline properties across all specialization variants to assess
+    /// occupancy and register pressure. Reports maxTotalThreadsPerThreadgroup (the key
+    /// indicator — lower values mean higher register pressure), threadExecutionWidth,
+    /// and threadgroup memory usage.
+    ///
+    /// On Apple Silicon, the compiler reduces maxTotalThreadsPerThreadgroup when a kernel
+    /// uses too many registers. Typical values:
+    ///   1024 = low register pressure (ideal)
+    ///    512 = moderate pressure
+    ///    256 = high pressure (occupancy-limited)
+    func testOccupancyAnalysis() throws {
+        print("")
+        print("=== Occupancy & Register Pressure Analysis ===")
+        print("Device: \(device.name)")
+        print("")
+
+        // --- 1. Pipeline property survey across all specialization variants ---
+
+        struct VariantInfo {
+            let label: String
+            let config: LICPipelineConfig
+        }
+
+        let variants: [VariantInfo] = [
+            VariantInfo(label: "Default (no mask, no edge gains, no debug)",
+                        config: LICPipelineConfig(maskEnabled: false, edgeGainsEnabled: false, debugMode: 0)),
+            VariantInfo(label: "Mask only",
+                        config: LICPipelineConfig(maskEnabled: true, edgeGainsEnabled: false, debugMode: 0)),
+            VariantInfo(label: "Mask + edge gains",
+                        config: LICPipelineConfig(maskEnabled: true, edgeGainsEnabled: true, debugMode: 0)),
+            VariantInfo(label: "Edge gains only",
+                        config: LICPipelineConfig(maskEnabled: false, edgeGainsEnabled: true, debugMode: 0)),
+            VariantInfo(label: "Debug: step count heat map",
+                        config: LICPipelineConfig(maskEnabled: false, edgeGainsEnabled: false, debugMode: 1)),
+            VariantInfo(label: "Debug: boundary hits",
+                        config: LICPipelineConfig(maskEnabled: true, edgeGainsEnabled: false, debugMode: 2)),
+            VariantInfo(label: "Debug: kernel support ratio",
+                        config: LICPipelineConfig(maskEnabled: false, edgeGainsEnabled: false, debugMode: 3)),
+            VariantInfo(label: "Full (mask + edge gains + debug 1)",
+                        config: LICPipelineConfig(maskEnabled: true, edgeGainsEnabled: true, debugMode: 1)),
+        ]
+
+        print("Pipeline Properties by Specialization Variant:")
+        print("")
+        let hdr = "\(pad("Variant", 48)) \(lpad("MaxTh", 6)) \(lpad("SIMD", 5)) "
+            + "\(lpad("SIMDs", 6)) \(lpad("TgMem", 6)) \(lpad("Occupancy", 10))"
+        print(hdr)
+        print(String(repeating: "\u{2500}", count: 85))
+
+        var defaultMaxThreads: Int = 1024
+
+        for v in variants {
+            let pipeline = try encoder.buildPipeline(for: v.config)
+            let maxThreads = pipeline.maxTotalThreadsPerThreadgroup
+            let simdWidth = pipeline.threadExecutionWidth
+            let tgMemBytes = pipeline.staticThreadgroupMemoryLength
+            let maxSimds = maxThreads / simdWidth
+
+            if v.config == LICPipelineConfig() {
+                defaultMaxThreads = maxThreads
+            }
+
+            // Occupancy estimate: maxThreads / 1024 (assuming 1024 is hardware max)
+            let occupancyPct = Double(maxThreads) / 1024.0 * 100.0
+            let occupancyStr = String(format: "%.0f%%", occupancyPct)
+
+            let line = "\(pad(v.label, 48)) \(lpad("\(maxThreads)", 6)) \(lpad("\(simdWidth)", 5)) "
+                + "\(lpad("\(maxSimds)", 6)) \(lpad("\(tgMemBytes)B", 6)) \(lpad(occupancyStr, 10))"
+            print(line)
+        }
+        print("")
+
+        // --- 2. Device capability context ---
+
+        print("Device Capabilities:")
+        print("  Max threadgroup memory:  \(device.maxThreadgroupMemoryLength) bytes")
+        print("  Max threads/threadgroup: \(defaultMaxThreads) (from default pipeline)")
+        print("  Recommended max working set size: \(device.recommendedMaxWorkingSetSize / (1024*1024)) MB")
+        if #available(macOS 13.0, *) {
+            print("  Architecture: \(device.architecture.name)")
+        }
+        print("")
+
+        // --- 3. Register pressure assessment ---
+
+        print("Register Pressure Assessment:")
+        print("")
+        if defaultMaxThreads >= 1024 {
+            print("  Status: LOW register pressure")
+            print("  maxTotalThreadsPerThreadgroup = \(defaultMaxThreads) (hardware maximum)")
+            print("  -> Occupancy is NOT limited by register usage.")
+            print("  -> Performance is likely memory-bandwidth or ALU bound, not occupancy bound.")
+            print("")
+            print("  Recommendation: No register-reduction optimizations needed.")
+            print("  Proceed to bandwidth analysis to determine the actual bottleneck.")
+        } else if defaultMaxThreads >= 512 {
+            print("  Status: MODERATE register pressure")
+            print("  maxTotalThreadsPerThreadgroup = \(defaultMaxThreads) (< 1024 hardware max)")
+            print("  -> Occupancy reduced to ~\(defaultMaxThreads * 100 / 1024)% of theoretical max.")
+            print("  -> May be limiting latency hiding for texture fetches.")
+            print("")
+            print("  Recommendations:")
+            print("  1. Split forward/backward integration into separate loops to reduce live register range")
+            print("  2. Reuse float2 temporaries (v, v1 can alias since they don't overlap)")
+            print("  3. Move boundary processing to a second pass if edge gains are rare")
+            print("  4. Use Xcode GPU Capture -> Shader Profiler for exact register count")
+        } else {
+            print("  Status: HIGH register pressure")
+            print("  maxTotalThreadsPerThreadgroup = \(defaultMaxThreads) (< 512)")
+            print("  -> Occupancy severely limited. This is likely the primary bottleneck.")
+            print("")
+            print("  Recommendations:")
+            print("  1. Aggressive register reduction: split kernel into multiple passes")
+            print("  2. Reduce float2 live variables in inner loop (currently ~5 float2 + scalars)")
+            print("  3. Consider half precision for intermediate positions if quality allows")
+            print("  4. Use Xcode GPU Capture -> Shader Profiler for exact register count")
+        }
+        print("")
+
+        // --- 4. Shader code analysis summary ---
+
+        print("Shader Register Analysis (from source):")
+        print("")
+        print("  Inner loop live variables (per direction):")
+        print("    float2 x        — current position (2 regs)")
+        print("    float2 v        — direction at x (2 regs)")
+        print("    float2 v1       — direction at midpoint (2 regs)")
+        print("    float2 x1       — midpoint position (2 regs)")
+        print("    float2 x_next   — next position (2 regs)")
+        print("    bool v_valid    — direction validity (1 reg)")
+        print("    bool v1_valid   — midpoint validity (1 reg)")
+        print("    uint step_count — loop counter (1 reg)")
+        print("    float w         — kernel weight (1 reg)")
+        print("    float s         — input sample (1 reg)")
+        print("  Outer scope (live across loop):")
+        print("    float2 x0       — pixel center (2 regs)")
+        print("    float W, H      — dimensions (2 regs)")
+        print("    float value     — accumulator (1 reg)")
+        print("    float used_sum  — weight sum (1 reg)")
+        print("    bool hit_domain_edge, hit_mask_edge (2 regs)")
+        print("    uint total_steps (1 reg)")
+        print("  Estimated total: ~24 scalar registers in inner loop")
+        print("  (Actual count may differ — compiler may spill or optimize)")
+        print("")
+
+        // --- 5. Comparative benchmark: effect of threadgroup size on occupancy ---
+
+        print("Occupancy Sensitivity Test (2K vortex, varying threadgroup size):")
+        print("  Testing whether larger threadgroups (more concurrent threads) improve perf...")
+        print("")
+
+        let testSizes: [(w: Int, h: Int, label: String)] = [
+            (8, 4, "8x4 (32 = 1 SIMD)"),
+            (8, 8, "8x8 (64 = 2 SIMDs)"),
+            (16, 16, "16x16 (256 = 8 SIMDs)"),
+            (32, 32, "32x32 (1024 = 32 SIMDs)"),
+        ]
+
+        let validSizes = testSizes.filter { $0.w * $0.h <= defaultMaxThreads }
+
+        var benchResults: [(label: String, gpuMs: Double)] = []
+        for (tw, th, label) in validSizes {
+            let scenario = BenchmarkScenario(
+                name: label,
+                width: 2048, height: 2048,
+                fieldType: .vortex,
+                warmUpCount: 3, measureCount: 10,
+                threadgroupSize: MTLSize(width: tw, height: th, depth: 1))
+            let result = try autoreleasepool {
+                try runBenchmark(scenario)
+            }
+            let ms = result.gpuTimingAvailable ? result.gpuMedian : result.wallMedian
+            benchResults.append((label: label, gpuMs: ms))
+        }
+
+        let bestMs = benchResults.min(by: { $0.gpuMs < $1.gpuMs })?.gpuMs ?? 1.0
+        let worstMs = benchResults.max(by: { $0.gpuMs < $1.gpuMs })?.gpuMs ?? 1.0
+        let spread = worstMs > 0 ? (worstMs - bestMs) / bestMs * 100 : 0
+
+        let tblHdr = "\(pad("Threadgroup", 32)) \(lpad("GPU med", 9)) \(lpad("FPS", 7)) \(lpad("vs best", 9))"
+        print(tblHdr)
+        print(String(repeating: "\u{2500}", count: 60))
+        for r in benchResults {
+            let fps = r.gpuMs > 0 ? 1000.0 / r.gpuMs : 0
+            let delta = String(format: "%+.1f%%", (r.gpuMs - bestMs) / bestMs * 100)
+            let marker = r.gpuMs <= bestMs * 1.001 ? " <-- BEST" : ""
+            let line = "\(pad(r.label, 32)) \(lpad(fmtMs(r.gpuMs), 9)) \(lpad(String(format: "%.1f", fps), 7)) \(lpad(delta, 9))\(marker)"
+            print(line)
+        }
+        print("")
+
+        // Interpret spread in context of register pressure findings.
+        let registersLimiting = defaultMaxThreads < 1024
+        if spread < 5.0 {
+            print("  Interpretation: <5% spread across threadgroup sizes.")
+            print("  -> Performance is NOT occupancy-sensitive.")
+            print("  -> Kernel is likely ALU-bound. Move to bandwidth analysis.")
+        } else if registersLimiting {
+            print("  Interpretation: \(String(format: "%.0f%%", spread)) spread AND maxThreads=\(defaultMaxThreads) < 1024.")
+            print("  -> Register pressure is limiting threadgroup size AND larger groups help.")
+            print("  -> Register reduction should yield measurable gains.")
+            print("  Recommendations:")
+            print("    1. Split forward/backward integration to reduce live register range")
+            print("    2. Reuse float2 temporaries (v, v1 can alias)")
+            print("    3. Use Xcode GPU Capture -> Shader Profiler for exact register count")
+        } else {
+            print("  Interpretation: \(String(format: "%.0f%%", spread)) spread, but maxThreads=\(defaultMaxThreads) (hardware max).")
+            print("  -> Kernel is TEXTURE-LATENCY BOUND, not register-limited.")
+            print("  -> Large threadgroups (32x32) are optimal for hiding ~120 texture fetches/pixel.")
+            print("  -> No register-reduction work needed.")
+            print("  -> Proceed to BANDWIDTH ANALYSIS to determine if access patterns can be improved.")
+        }
+        print("")
+    }
 }

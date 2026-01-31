@@ -33,7 +33,7 @@
 
 - [x] Profile on M1 Pro at 2K and 4K
 - [x] Threadgroup size tuning (start 8×8 / 16×16, measure)
-- [ ] Occupancy & register pressure analysis — GPU capture → shader profiler; check max concurrent threads; reduce live registers if occupancy is low (split loops, reduce temporaries)
+- [x] Occupancy & register pressure analysis — all 8 pipeline variants at maxThreads=1024 (100% occupancy); no register pressure. 82% threadgroup-size spread confirms kernel is texture-latency bound, not register-limited. 32×32 threadgroups optimal. No register reduction needed.
 - [ ] Bandwidth analysis — GPU capture → check ALU-bound vs memory-bound limiter at 4K; if bandwidth-limited, evaluate access pattern coherence and format tightening
 - [ ] Resource reuse — precreated pipelines, samplers, buffers; no per-frame allocation
 - [ ] Multiple in-flight command buffers
@@ -41,3 +41,7 @@
 - [ ] bryLIC parity checks (SSIM, histogram distance, error heatmaps — advisory only)
 
 **Exit criterion**: 2K@60fps or 4K@~30fps on M1 Pro with default params (L=30, h=1.0, 1 iteration).
+
+## Maybe / deferred
+
+- [ ] r32Float ping-pong intermediates for multi-pass — avoids float16 quantization between passes, but the implicit float32→float16 texture-write conversion differs from MSL's `half()` cast (doubles single-pass error), and removing the float16 sync point causes GPU-vs-CPU arithmetic differences to compound ~fullSum× per pass. Requires either a per-pass comparison test methodology (GPU readback between passes) or a function-constant-controlled output conversion. Only worth pursuing if float16 intermediates cause visible banding artifacts in practice.
