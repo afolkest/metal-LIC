@@ -19,6 +19,8 @@ struct SliderOverlay: View {
             if isExpanded {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 12) {
+                        performanceSection
+                        Divider()
                         displaySection
                         Divider()
                         blendSection
@@ -40,6 +42,31 @@ struct SliderOverlay: View {
 
     // MARK: - Sections
 
+    private var performanceSection: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Text("Performance").font(.headline).foregroundColor(.white)
+                Spacer()
+                Text(String(format: "%.0f fps", settings.fps))
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundColor(.white.opacity(0.6))
+            }
+            HStack {
+                Text("Resolution")
+                    .font(.system(size: 11))
+                    .foregroundColor(.white.opacity(0.8))
+                Spacer()
+                Picker("", selection: $settings.resolution) {
+                    Text("512").tag(512)
+                    Text("1024").tag(1024)
+                    Text("2048").tag(2048)
+                }
+                .pickerStyle(.segmented)
+                .frame(width: 160)
+            }
+        }
+    }
+
     private var displaySection: some View {
         VStack(alignment: .leading, spacing: 6) {
             Text("Display").font(.headline).foregroundColor(.white)
@@ -60,7 +87,7 @@ struct SliderOverlay: View {
     private var licSection: some View {
         VStack(alignment: .leading, spacing: 6) {
             Text("LIC").font(.headline).foregroundColor(.white)
-            paramSlider(label: "Kernel Length", value: $settings.kernelLength, range: 2...60)
+            paramSlider(label: "Kernel Length", value: $settings.kernelLength, range: 2...120)
         }
     }
 

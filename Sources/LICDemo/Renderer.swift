@@ -19,7 +19,7 @@ final class Renderer: NSObject, MTKViewDelegate {
 
     // MARK: - Constants
 
-    private let resolution = 1024
+    private var resolution: Int = 1024
     private let maxInFlight = 3
 
     // MARK: - Metal core
@@ -37,13 +37,13 @@ final class Renderer: NSObject, MTKViewDelegate {
 
     // MARK: - CA (protocol-based)
 
-    private let ca: CellularAutomaton
+    private var ca: CellularAutomaton
 
     // MARK: - Noise blend
 
     private let noiseBlendPipeline: MTLComputePipelineState
-    private let noiseTex: MTLTexture
-    private let blendedTex: MTLTexture
+    private var noiseTex: MTLTexture
+    private var blendedTex: MTLTexture
 
     // MARK: - Display
 
@@ -52,12 +52,22 @@ final class Renderer: NSObject, MTKViewDelegate {
 
     // MARK: - Textures
 
-    private let vectorField: MTLTexture
-    private let licOutput: MTLTexture
+    private var vectorField: MTLTexture
+    private var licOutput: MTLTexture
+
+    // MARK: - Shader library (kept for CA recreation on resolution change)
+
+    private let demoLibrary: MTLLibrary
 
     // MARK: - Vector field state
 
     private var currentPreset: Int = 6
+
+    // MARK: - FPS tracking
+
+    private var lastFrameTime: CFAbsoluteTime = 0
+    private var fpsFrameCount: Int = 0
+    private var fpsTimeAccum: CFAbsoluteTime = 0
 
     // MARK: - Settings
 
@@ -96,16 +106,15 @@ final class Renderer: NSObject, MTKViewDelegate {
         self.licWeights = licResult.weights
 
         // --- Compile demo shaders ---
-        let demoLibrary: MTLLibrary
         do {
-            demoLibrary = try Renderer.makeDemoLibrary(device: device)
+            self.demoLibrary = try Renderer.makeDemoLibrary(device: device)
         } catch {
             fatalError("Failed to compile demo shaders: \(error)")
         }
 
         // Noise blend pipeline
         do {
-            guard let blendFunc = demoLibrary.makeFunction(name: "noiseBlendKernel") else {
+            guard let blendFunc = self.demoLibrary.makeFunction(name: "noiseBlendKernel") else {
                 fatalError("noiseBlendKernel not found")
             }
             self.noiseBlendPipeline = try device.makeComputePipelineState(function: blendFunc)
@@ -115,8 +124,8 @@ final class Renderer: NSObject, MTKViewDelegate {
 
         // Display render pipeline
         do {
-            guard let vertFunc = demoLibrary.makeFunction(name: "displayVertex"),
-                  let fragFunc = demoLibrary.makeFunction(name: "displayFragment") else {
+            guard let vertFunc = self.demoLibrary.makeFunction(name: "displayVertex"),
+                  let fragFunc = self.demoLibrary.makeFunction(name: "displayFragment") else {
                 fatalError("Display shader functions not found")
             }
             let pipeDesc = MTLRenderPipelineDescriptor()
@@ -156,7 +165,7 @@ final class Renderer: NSObject, MTKViewDelegate {
         // --- Create CA ---
         do {
             let fireCA = try ForestFireCA(device: device, commandQueue: queue,
-                                           library: demoLibrary, resolution: resolution)
+                                           library: self.demoLibrary, resolution: resolution)
             self.ca = fireCA
         } catch {
             fatalError("Failed to create CA: \(error)")
@@ -296,6 +305,11 @@ final class Renderer: NSObject, MTKViewDelegate {
         if settings.vectorPreset != currentPreset {
             switchPreset(settings.vectorPreset)
         }
+
+        // Resolution change
+        if settings.resolution != resolution {
+            rebuildForResolution(settings.resolution)
+        }
     }
 
     // MARK: - Frame rendering
@@ -303,6 +317,22 @@ final class Renderer: NSObject, MTKViewDelegate {
     func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {}
 
     func draw(in view: MTKView) {
+        // FPS tracking
+        let now = CFAbsoluteTimeGetCurrent()
+        if lastFrameTime > 0 {
+            fpsTimeAccum += now - lastFrameTime
+            fpsFrameCount += 1
+            if fpsTimeAccum >= 0.5 {
+                let measuredFps = Double(fpsFrameCount) / fpsTimeAccum
+                DispatchQueue.main.async { [weak self] in
+                    self?.settings.fps = measuredFps
+                }
+                fpsFrameCount = 0
+                fpsTimeAccum = 0
+            }
+        }
+        lastFrameTime = now
+
         semaphore.wait()
 
         syncSettings()
@@ -394,7 +424,7 @@ final class Renderer: NSObject, MTKViewDelegate {
         case "r", "R":
             settings.resetRequested = true
         case "+", "=":
-            settings.kernelLength = min(60, settings.kernelLength + 2)
+            settings.kernelLength = min(120, settings.kernelLength + 2)
         case "-", "_":
             settings.kernelLength = max(2, settings.kernelLength - 2)
         default:
@@ -409,8 +439,48 @@ final class Renderer: NSObject, MTKViewDelegate {
         ca.setVectorField(vectorField)
     }
 
+    private func rebuildForResolution(_ newRes: Int) {
+        // Called from draw() which already holds one semaphore slot,
+        // so drain only the remaining in-flight work.
+        for _ in 0..<(maxInFlight - 1) {
+            semaphore.wait()
+        }
+
+        resolution = newRes
+        let w = newRes
+        let h = newRes
+
+        vectorField = Renderer.makePrivateTexture(device: device, format: .rg32Float,
+                                                    width: w, height: h, label: "Vector Field")
+        licOutput = Renderer.makePrivateTexture(device: device, format: .r16Float,
+                                                  width: w, height: h, label: "LIC Output")
+        blendedTex = Renderer.makePrivateTexture(device: device, format: .r32Float,
+                                                   width: w, height: h, label: "Blended")
+        noiseTex = Renderer.makeStaticNoise(device: device, commandQueue: commandQueue,
+                                             width: w, height: h)
+
+        do {
+            let fireCA = try ForestFireCA(device: device, commandQueue: commandQueue,
+                                           library: demoLibrary, resolution: newRes)
+            ca = fireCA
+            settings.populateFromCA(ca)
+        } catch {
+            print("Failed to recreate CA: \(error)")
+        }
+
+        uploadVectorField(preset: currentPreset)
+        ca.setVectorField(vectorField)
+
+        // Restore the slots we drained (not the one draw() holds —
+        // draw() will return without submitting work this frame,
+        // and its completed handler will signal its own slot).
+        for _ in 0..<(maxInFlight - 1) {
+            semaphore.signal()
+        }
+    }
+
     private func adjustKernelLength(to newL: Float) {
-        let clamped = max(2.0, min(60.0, newL))
+        let clamped = max(2.0, min(120.0, newL))
         currentL = clamped
         do {
             let result = try LICKernel.build(L: clamped, h: 1.0)

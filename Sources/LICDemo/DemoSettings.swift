@@ -2,6 +2,14 @@ import SwiftUI
 
 final class DemoSettings: ObservableObject {
 
+    // MARK: - Info (set by renderer)
+
+    @Published var fps: Double = 0
+
+    // MARK: - Resolution
+
+    @Published var resolution: Int = 1024
+
     // MARK: - Display
 
     @Published var exposure: Float = 1.0

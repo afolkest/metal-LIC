@@ -74,13 +74,13 @@ kernel void forestFireKernel(
     float newHeat = heat;
 
     if (wasBurning) {
-        // Burning: consume fuel
-        newFuel = fuel - params.fuelConsume;
-        if (newFuel < params.fuelToSustain) {
-            // Extinguish — not enough fuel
-            newHeat = 0.0;
+        if (fuel > params.fuelToSustain) {
+            // Still has enough fuel — consume and continue burning
+            newFuel = fuel - params.fuelConsume;
+            newHeat = 1.0;
         } else {
-            newHeat = 1.0; // still burning
+            // Extinguished — decay heat gradually (no fuel consumed)
+            newHeat = max(0.0, heat - params.heatDecay);
         }
     } else {
         // Not burning: regenerate fuel (only if cooled enough, matching Python's heat < 0.3)
@@ -132,6 +132,7 @@ kernel void forestFireKernel(
         }
     }
 
+    newFuel = clamp(newFuel, 0.0f, 1.0f);
     stateOut.write(float4(newFuel, newHeat, 0.0, 1.0), gid);
     heatOut.write(float4(newHeat, 0.0, 0.0, 1.0), gid);
 }
