@@ -24,6 +24,7 @@ final class DemoSettings: ObservableObject {
     // MARK: - LIC
 
     @Published var kernelLength: Float = 20.0
+    @Published var licPasses: Int = 1
 
     // MARK: - Vector field
 
@@ -33,6 +34,10 @@ final class DemoSettings: ObservableObject {
 
     @Published var caValues: [String: Float] = [:]
     @Published var caParameters: [CAParameter] = []
+
+    // MARK: - Recording
+
+    @Published var isRecording = false
 
     // MARK: - Actions
 
