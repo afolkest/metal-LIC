@@ -179,7 +179,7 @@ public enum LICReferenceCPU {
                 // Boundary processing (Section 9)
                 // Renormalization is always active for boundary-truncated kernels.
                 // Edge gains are gated by edgeGainsEnabled.
-                let needsBoundary = usedSum > centerWeight && usedSum < fullSum
+                let needsBoundary = usedSum < fullSum
                 let applyMaskEdge = hitMaskEdge && !startingMasked
 
                 if needsBoundary && (applyMaskEdge || hitDomainEdge) {
@@ -348,7 +348,7 @@ public enum LICReferenceCPU {
                 // Boundary processing (Section 9)
                 // Renormalization is always active for boundary-truncated kernels.
                 // Edge gains are gated by edgeGainsEnabled.
-                let needsBoundary = usedSum > centerWeight && usedSum < fullSum
+                let needsBoundary = usedSum < fullSum
                 let applyMaskEdge = hitMaskEdge && !startingMasked
 
                 if needsBoundary && (applyMaskEdge || hitDomainEdge) {

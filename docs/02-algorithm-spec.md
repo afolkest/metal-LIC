@@ -232,7 +232,7 @@ Final output:
 
 **Boundary processing (matches bryLIC behavior)**:
 - `center_weight = kernel[kmid]`
-- `needs_boundary_processing = (used_sum > center_weight) && (used_sum < full_sum)`
+- `needs_boundary_processing = (used_sum < full_sum)`
 - `hit_domain_edge`: true if either forward or backward integration hit a closed boundary.
 - `hit_mask_edge`: true if either direction entered a masked pixel.
 - `apply_mask_edge = hit_mask_edge && starting_pixel_not_masked`

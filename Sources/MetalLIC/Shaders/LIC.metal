@@ -191,8 +191,7 @@ kernel void licKernel(
     // Edge gains are gated by kEdgeGainsEnabled function constant.
     // ------------------------------------------------------------------
     {
-        bool needs_boundary = (used_sum > params.center_weight)
-                           && (used_sum < params.full_sum);
+        bool needs_boundary = (used_sum < params.full_sum);
         bool apply_mask_edge = hit_mask_edge && !starting_masked;
 
         if (needs_boundary && (apply_mask_edge || hit_domain_edge)) {
