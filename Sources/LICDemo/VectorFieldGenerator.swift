@@ -22,7 +22,8 @@ enum VectorFieldGenerator {
                 case 3: vec = radial(nx, ny)
                 case 4: vec = diagonal(nx, ny)
                 case 5: vec = doubleVortex(nx, ny)
-                default: vec = vortex(nx, ny)
+                case 6: vec = spiral(nx, ny)
+                default: vec = spiral(nx, ny)
                 }
 
                 // Normalize to direction-only (unit length or zero)
@@ -73,5 +74,12 @@ enum VectorFieldGenerator {
         let wR = 1.0 / (dR * dR)
 
         return (left * wL + right * wR) / (wL + wR)
+    }
+
+    /// 6. Spiral: counter-clockwise rotation + 0.3x radial outward
+    private static func spiral(_ x: Float, _ y: Float) -> SIMD2<Float> {
+        let tangential = SIMD2<Float>(-y, x)
+        let radial = SIMD2<Float>(x, y)
+        return tangential + 0.3 * radial
     }
 }

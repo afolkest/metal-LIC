@@ -5,14 +5,18 @@ struct ForestFireParams {
     uint  width;
     uint  height;
     uint  frameNumber;
-    float growthRate;     // regrowth speed
-    float ignitionProb;   // spontaneous ignition probability
-    float burnRate;       // how fast burning cells decay
-    float spreadRate;     // fire spread probability per burning neighbor
-    float diffusion;      // spatial smoothing toward neighbor average
+    float igniteProb;    // spontaneous ignition probability
+    float spreadProb;    // base spread probability per burning neighbor
+    float fuelRegen;     // fuel regrowth rate per step
+    float fuelConsume;   // fuel consumed per burning step
+    float heatDecay;     // heat decay rate when not burning
+    float fuelToIgnite;  // minimum fuel for spontaneous ignition
+    float fuelToSpread;  // minimum fuel for fire spread
+    float fuelToSustain; // minimum fuel to keep burning
+    float windStrength;  // wind influence on spread direction
 };
 
-// Simple hash-based RNG: deterministic per (x, y, frame)
+// PCG hash-based RNG
 static float pcgHash(uint input) {
     uint state = input * 747796405u + 2891336453u;
     uint word = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
@@ -24,73 +28,10 @@ static float rng(uint x, uint y, uint frame, uint salt) {
     return pcgHash(seed);
 }
 
-kernel void forestFireKernel(
-    texture2d<float, access::read>   stateIn  [[texture(0)]],
-    texture2d<float, access::write>  stateOut [[texture(1)]],
-    constant ForestFireParams&       params   [[buffer(0)]],
-    uint2                            gid      [[thread_position_in_grid]])
-{
-    if (gid.x >= params.width || gid.y >= params.height) return;
-
-    float cell = stateIn.read(gid).r;
-    float r0 = rng(gid.x, gid.y, params.frameNumber, 0u);
-    float r1 = rng(gid.x, gid.y, params.frameNumber, 1u);
-
-    // Count burning neighbors (Moore neighborhood, toroidal wrapping)
-    float burningCount = 0.0;
-    float neighborSum = 0.0;
-    for (int dy = -1; dy <= 1; dy++) {
-        for (int dx = -1; dx <= 1; dx++) {
-            if (dx == 0 && dy == 0) continue;
-            uint nx = (gid.x + uint(dx + int(params.width))) % params.width;
-            uint ny = (gid.y + uint(dy + int(params.height))) % params.height;
-            float n = stateIn.read(uint2(nx, ny)).r;
-            neighborSum += n;
-            if (n > 0.85) burningCount += 1.0;
-        }
-    }
-    float neighborAvg = neighborSum / 8.0;
-
-    float result;
-
-    if (cell > 0.85) {
-        // Burning: decay
-        result = cell - params.burnRate;
-        if (result <= 0.85) {
-            result = 0.0; // snap to ash
-        }
-    } else if (cell > 0.15) {
-        // Vegetation: grow, diffuse, maybe catch fire
-        result = cell + params.growthRate;
-        // Spatial diffusion
-        result = mix(result, neighborAvg, params.diffusion);
-        // Ignition from burning neighbors
-        if (burningCount > 0.0 && r0 < params.spreadRate * burningCount) {
-            result = 0.95; // ignite
-        }
-        // Rare spontaneous ignition
-        if (r1 < params.ignitionProb) {
-            result = 0.95;
-        }
-        result = clamp(result, 0.0, 0.84); // stay vegetation unless ignited
-        if (burningCount > 0.0 && r0 < params.spreadRate * burningCount) {
-            result = 0.95;
-        }
-        if (r1 < params.ignitionProb) {
-            result = 0.95;
-        }
-    } else {
-        // Empty/ash: regrow slowly with random variation
-        result = cell + params.growthRate * (0.5 + 0.5 * r0);
-        result = clamp(result, 0.0, 0.84);
-    }
-
-    stateOut.write(float4(result, 0.0, 0.0, 1.0), gid);
-}
-
-// Initialize CA state: ~80% mid-vegetation, ~15% mature, ~5% burning seeds
+// Initialize CA: fuel=0.8–1.0, 5% burning seeds (heat=1.0), rest heat=0
 kernel void forestFireInitKernel(
     texture2d<float, access::write>  stateOut [[texture(0)]],
+    texture2d<float, access::write>  heatOut  [[texture(1)]],
     constant uint&                   seed     [[buffer(0)]],
     uint2                            gid      [[thread_position_in_grid]])
 {
@@ -99,18 +40,98 @@ kernel void forestFireInitKernel(
     if (gid.x >= w || gid.y >= h) return;
 
     float r = rng(gid.x, gid.y, seed, 42u);
+    float fuelR = rng(gid.x, gid.y, seed, 55u);
 
-    float value;
+    float fuel = 0.8 + fuelR * 0.2; // start with high fuel
+    float heat = 0.0;
+
     if (r < 0.05) {
         // 5% burning seeds
-        value = 0.90 + rng(gid.x, gid.y, seed, 99u) * 0.10;
-    } else if (r < 0.20) {
-        // 15% mature vegetation (close to burning threshold)
-        value = 0.65 + rng(gid.x, gid.y, seed, 77u) * 0.19;
-    } else {
-        // 80% mid-vegetation
-        value = 0.20 + rng(gid.x, gid.y, seed, 55u) * 0.45;
+        heat = 1.0;
     }
 
-    stateOut.write(float4(value, 0.0, 0.0, 1.0), gid);
+    stateOut.write(float4(fuel, heat, 0.0, 1.0), gid);
+    heatOut.write(float4(heat, 0.0, 0.0, 1.0), gid);
+}
+
+// 3-field forest fire CA: fuel + heat in rg32Float, 4-connectivity, anisotropic wind spread
+kernel void forestFireKernel(
+    texture2d<float, access::read>   stateIn    [[texture(0)]],
+    texture2d<float, access::write>  stateOut   [[texture(1)]],
+    texture2d<float, access::write>  heatOut    [[texture(2)]],
+    texture2d<float, access::read>   vectorTex  [[texture(3)]],
+    constant ForestFireParams&       params     [[buffer(0)]],
+    uint2                            gid        [[thread_position_in_grid]])
+{
+    if (gid.x >= params.width || gid.y >= params.height) return;
+
+    float2 state = stateIn.read(gid).rg;
+    float fuel = state.r;
+    float heat = state.g;
+    bool wasBurning = heat >= 0.999;
+
+    float newFuel = fuel;
+    float newHeat = heat;
+
+    if (wasBurning) {
+        // Burning: consume fuel
+        newFuel = fuel - params.fuelConsume;
+        if (newFuel < params.fuelToSustain) {
+            // Extinguish — not enough fuel
+            newHeat = 0.0;
+        } else {
+            newHeat = 1.0; // still burning
+        }
+    } else {
+        // Not burning: regenerate fuel (only if cooled enough, matching Python's heat < 0.3)
+        if (heat < 0.3) {
+            newFuel = min(fuel + params.fuelRegen, 1.0);
+        }
+
+        // Check 4-connected neighbors (von Neumann) for fire spread
+        bool ignited = false;
+        float2 windDir = vectorTex.read(gid).rg;
+
+        // Cardinal offsets: right, up, left, down
+        const int2 offsets[4] = { int2(1,0), int2(0,1), int2(-1,0), int2(0,-1) };
+
+        for (int i = 0; i < 4; i++) {
+            int2 off = offsets[i];
+            uint nx = (gid.x + uint(off.x + int(params.width))) % params.width;
+            uint ny = (gid.y + uint(off.y + int(params.height))) % params.height;
+
+            float2 nState = stateIn.read(uint2(nx, ny)).rg;
+            bool neighborBurning = nState.g >= 0.999;
+
+            if (neighborBurning && newFuel >= params.fuelToSpread) {
+                // spreadDir = direction fire travels FROM neighbor TO us = -offset
+                float2 spreadDir = float2(-float(off.x), -float(off.y));
+                float windMod = clamp(1.0 + params.windStrength * dot(spreadDir, windDir), 0.0, 20.0);
+                float prob = params.spreadProb * newFuel * windMod;
+
+                float r = rng(gid.x, gid.y, params.frameNumber, uint(i + 10));
+                if (r < prob) {
+                    ignited = true;
+                }
+            }
+        }
+
+        // Spontaneous ignition
+        if (!ignited && newFuel >= params.fuelToIgnite) {
+            float r = rng(gid.x, gid.y, params.frameNumber, 100u);
+            if (r < params.igniteProb) {
+                ignited = true;
+            }
+        }
+
+        // Decay residual heat
+        if (!ignited) {
+            newHeat = max(0.0, heat - params.heatDecay);
+        } else {
+            newHeat = 1.0;
+        }
+    }
+
+    stateOut.write(float4(newFuel, newHeat, 0.0, 1.0), gid);
+    heatOut.write(float4(newHeat, 0.0, 0.0, 1.0), gid);
 }

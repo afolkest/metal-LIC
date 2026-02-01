@@ -1,22 +1,18 @@
 import MetalKit
 import MetalLIC
 
-// Must match ForestFire.metal layout
-struct ForestFireParams {
-    var width: UInt32
-    var height: UInt32
-    var frameNumber: UInt32
-    var growthRate: Float
-    var ignitionProb: Float
-    var burnRate: Float
-    var spreadRate: Float
-    var diffusion: Float
-}
-
 // Must match Display.metal layout
 struct DisplayParams {
     var fullSum: Float
+    var exposure: Float
+    var contrast: Float
+    var brightness: Float
     var gamma: Float
+}
+
+// Must match NoiseBlend.metal layout
+struct NoiseBlendParams {
+    var fireWeight: Float
 }
 
 final class Renderer: NSObject, MTKViewDelegate {
@@ -39,15 +35,15 @@ final class Renderer: NSObject, MTKViewDelegate {
     private var licWeights: [Float]
     private var currentL: Float = 20.0
 
-    // MARK: - Forest fire CA
+    // MARK: - CA (protocol-based)
 
-    private let caComputePipeline: MTLComputePipelineState
-    private let caInitPipeline: MTLComputePipelineState
-    private var caStateA: MTLTexture
-    private var caStateB: MTLTexture
-    private var caFrame: UInt32 = 0
-    private var caPingPong: Bool = false // false = A→B, true = B→A
-    private var caPaused: Bool = false
+    private let ca: CellularAutomaton
+
+    // MARK: - Noise blend
+
+    private let noiseBlendPipeline: MTLComputePipelineState
+    private let noiseTex: MTLTexture
+    private let blendedTex: MTLTexture
 
     // MARK: - Display
 
@@ -61,24 +57,21 @@ final class Renderer: NSObject, MTKViewDelegate {
 
     // MARK: - Vector field state
 
-    private var currentPreset: Int = 1
+    private var currentPreset: Int = 6
 
-    // MARK: - CA default params
+    // MARK: - Settings
 
-    private var caGrowthRate: Float = 0.003
-    private var caIgnitionProb: Float = 0.0001
-    private var caBurnRate: Float = 0.05
-    private var caSpreadRate: Float = 0.15
-    private var caDiffusion: Float = 0.02
+    let settings: DemoSettings
 
     // MARK: - Threadgroup size
 
-    private let caThreadgroupSize = MTLSize(width: 16, height: 16, depth: 1)
+    private let threadgroupSize = MTLSize(width: 16, height: 16, depth: 1)
 
     // MARK: - Init
 
-    init(device: MTLDevice, view: MTKView) {
+    init(device: MTLDevice, view: MTKView, settings: DemoSettings) {
         self.device = device
+        self.settings = settings
         guard let queue = device.makeCommandQueue() else {
             fatalError("Failed to create command queue")
         }
@@ -92,7 +85,7 @@ final class Renderer: NSObject, MTKViewDelegate {
             fatalError("Failed to create LIC encoder: \(error)")
         }
 
-        // Build LIC kernel (L=20, h=1.0)
+        // Build LIC kernel
         let licResult: (params: LicParams, weights: [Float])
         do {
             licResult = try LICKernel.build(L: 20.0, h: 1.0)
@@ -110,19 +103,14 @@ final class Renderer: NSObject, MTKViewDelegate {
             fatalError("Failed to compile demo shaders: \(error)")
         }
 
-        // CA compute pipelines
+        // Noise blend pipeline
         do {
-            guard let caFunc = demoLibrary.makeFunction(name: "forestFireKernel") else {
-                fatalError("forestFireKernel not found")
+            guard let blendFunc = demoLibrary.makeFunction(name: "noiseBlendKernel") else {
+                fatalError("noiseBlendKernel not found")
             }
-            self.caComputePipeline = try device.makeComputePipelineState(function: caFunc)
-
-            guard let caInitFunc = demoLibrary.makeFunction(name: "forestFireInitKernel") else {
-                fatalError("forestFireInitKernel not found")
-            }
-            self.caInitPipeline = try device.makeComputePipelineState(function: caInitFunc)
+            self.noiseBlendPipeline = try device.makeComputePipelineState(function: blendFunc)
         } catch {
-            fatalError("Failed to create CA pipeline: \(error)")
+            fatalError("Failed to create noise blend pipeline: \(error)")
         }
 
         // Display render pipeline
@@ -156,43 +144,55 @@ final class Renderer: NSObject, MTKViewDelegate {
         let w = resolution
         let h = resolution
 
-        self.caStateA = Renderer.makePrivateTexture(device: device, format: .r32Float,
-                                                     width: w, height: h, label: "CA State A")
-        self.caStateB = Renderer.makePrivateTexture(device: device, format: .r32Float,
-                                                     width: w, height: h, label: "CA State B")
         self.vectorField = Renderer.makePrivateTexture(device: device, format: .rg32Float,
                                                         width: w, height: h, label: "Vector Field")
         self.licOutput = Renderer.makePrivateTexture(device: device, format: .r16Float,
                                                       width: w, height: h, label: "LIC Output")
+        self.blendedTex = Renderer.makePrivateTexture(device: device, format: .r32Float,
+                                                       width: w, height: h, label: "Blended")
+        self.noiseTex = Renderer.makeStaticNoise(device: device, commandQueue: queue,
+                                                   width: w, height: h)
+
+        // --- Create CA ---
+        do {
+            let fireCA = try ForestFireCA(device: device, commandQueue: queue,
+                                           library: demoLibrary, resolution: resolution)
+            self.ca = fireCA
+        } catch {
+            fatalError("Failed to create CA: \(error)")
+        }
 
         super.init()
 
-        // Initialize CA state on GPU
-        initializeCA()
+        // Initialize settings from CA
+        settings.populateFromCA(ca)
+        settings.vectorPreset = currentPreset
 
-        // Upload initial vector field (preset 1 = vortex)
+        // Upload initial vector field
         uploadVectorField(preset: currentPreset)
+        ca.setVectorField(vectorField)
     }
 
     // MARK: - Shader compilation
 
     private static func makeDemoLibrary(device: MTLDevice) throws -> MTLLibrary {
-        // Load both shader files from bundle resources and compile together
         guard let ffURL = Bundle.module.url(forResource: "ForestFire", withExtension: "metal",
                                              subdirectory: "Shaders"),
               let dispURL = Bundle.module.url(forResource: "Display", withExtension: "metal",
-                                               subdirectory: "Shaders") else {
+                                               subdirectory: "Shaders"),
+              let blendURL = Bundle.module.url(forResource: "NoiseBlend", withExtension: "metal",
+                                                subdirectory: "Shaders") else {
             fatalError("Demo shader sources not found in bundle")
         }
         let ffSource = try String(contentsOf: ffURL, encoding: .utf8)
         let dispSource = try String(contentsOf: dispURL, encoding: .utf8)
+        let blendSource = try String(contentsOf: blendURL, encoding: .utf8)
 
-        // Combine sources (each has its own includes, Metal handles dedup)
-        let combined = ffSource + "\n" + dispSource
+        let combined = ffSource + "\n" + dispSource + "\n" + blendSource
         return try device.makeLibrary(source: combined, options: nil)
     }
 
-    // MARK: - Texture creation (private storage)
+    // MARK: - Texture creation
 
     private static func makePrivateTexture(device: MTLDevice, format: MTLPixelFormat,
                                             width: Int, height: Int,
@@ -208,25 +208,39 @@ final class Renderer: NSObject, MTKViewDelegate {
         return tex
     }
 
-    // MARK: - CA initialization
+    private static func makeStaticNoise(device: MTLDevice, commandQueue: MTLCommandQueue,
+                                          width: Int, height: Int) -> MTLTexture {
+        // Generate white noise on CPU, upload to GPU
+        var pixels = [Float](repeating: 0, count: width * height)
+        for i in 0..<pixels.count {
+            pixels[i] = Float.random(in: 0...1)
+        }
 
-    private func initializeCA() {
-        guard let cmdBuf = commandQueue.makeCommandBuffer(),
-              let enc = cmdBuf.makeComputeCommandEncoder() else { return }
+        let tex = makePrivateTexture(device: device, format: .r32Float,
+                                      width: width, height: height, label: "Static Noise")
 
-        enc.setComputePipelineState(caInitPipeline)
-        enc.setTexture(caStateA, index: 0)
-        var seed: UInt32 = UInt32.random(in: 0..<UInt32.max)
-        enc.setBytes(&seed, length: MemoryLayout<UInt32>.stride, index: 0)
+        let bytesPerRow = width * MemoryLayout<Float>.stride
+        let totalBytes = bytesPerRow * height
 
-        let gridSize = MTLSize(width: resolution, height: resolution, depth: 1)
-        enc.dispatchThreads(gridSize, threadsPerThreadgroup: caThreadgroupSize)
-        enc.endEncoding()
+        guard let staging = device.makeBuffer(bytes: pixels, length: totalBytes,
+                                               options: .storageModeShared),
+              let cmdBuf = commandQueue.makeCommandBuffer(),
+              let blit = cmdBuf.makeBlitCommandEncoder() else {
+            fatalError("Failed to upload noise texture")
+        }
+
+        blit.copy(from: staging, sourceOffset: 0,
+                  sourceBytesPerRow: bytesPerRow,
+                  sourceBytesPerImage: totalBytes,
+                  sourceSize: MTLSize(width: width, height: height, depth: 1),
+                  to: tex, destinationSlice: 0,
+                  destinationLevel: 0,
+                  destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0))
+        blit.endEncoding()
         cmdBuf.commit()
         cmdBuf.waitUntilCompleted()
 
-        caFrame = 0
-        caPingPong = false
+        return tex
     }
 
     // MARK: - Vector field upload
@@ -236,12 +250,10 @@ final class Renderer: NSObject, MTKViewDelegate {
         let h = resolution
         let data = VectorFieldGenerator.generate(preset: preset, width: w, height: h)
 
-        // Upload via staging buffer + blit
         let bytesPerRow = w * MemoryLayout<SIMD2<Float>>.stride
         let totalBytes = bytesPerRow * h
 
-        guard let staging = device.makeBuffer(bytes: data,
-                                               length: totalBytes,
+        guard let staging = device.makeBuffer(bytes: data, length: totalBytes,
                                                options: .storageModeShared),
               let cmdBuf = commandQueue.makeCommandBuffer(),
               let blit = cmdBuf.makeBlitCommandEncoder() else { return }
@@ -258,12 +270,42 @@ final class Renderer: NSObject, MTKViewDelegate {
         cmdBuf.waitUntilCompleted()
     }
 
+    // MARK: - Settings sync
+
+    private func syncSettings() {
+        // Sync CA params from UI
+        for param in ca.parameters {
+            if let val = settings.caValues[param.id] {
+                ca.setValue(val, for: param.id)
+            }
+        }
+
+        // Handle CA reset
+        if settings.resetRequested {
+            ca.reset()
+            settings.resetRequested = false
+        }
+
+        // Kernel length change
+        let newL = settings.kernelLength
+        if abs(newL - currentL) > 0.5 {
+            adjustKernelLength(to: newL)
+        }
+
+        // Preset change
+        if settings.vectorPreset != currentPreset {
+            switchPreset(settings.vectorPreset)
+        }
+    }
+
     // MARK: - Frame rendering
 
     func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {}
 
     func draw(in view: MTKView) {
         semaphore.wait()
+
+        syncSettings()
 
         guard let drawable = view.currentDrawable,
               let passDesc = view.currentRenderPassDescriptor,
@@ -275,43 +317,32 @@ final class Renderer: NSObject, MTKViewDelegate {
         let sem = semaphore
         cmdBuf.addCompletedHandler { _ in sem.signal() }
 
-        // --- Pass 1: Forest fire CA ---
-        if !caPaused {
-            let srcTex = caPingPong ? caStateB : caStateA
-            let dstTex = caPingPong ? caStateA : caStateB
+        // --- Pass 1: CA step ---
+        ca.encodeStep(commandBuffer: cmdBuf)
 
+        // --- Pass 2: Noise blend ---
+        do {
             guard let enc = cmdBuf.makeComputeCommandEncoder() else { return }
-            enc.setComputePipelineState(caComputePipeline)
-            enc.setTexture(srcTex, index: 0)
-            enc.setTexture(dstTex, index: 1)
+            enc.setComputePipelineState(noiseBlendPipeline)
+            enc.setTexture(ca.licInputTexture, index: 0)
+            enc.setTexture(noiseTex, index: 1)
+            enc.setTexture(blendedTex, index: 2)
 
-            var params = ForestFireParams(
-                width: UInt32(resolution), height: UInt32(resolution),
-                frameNumber: caFrame,
-                growthRate: caGrowthRate, ignitionProb: caIgnitionProb,
-                burnRate: caBurnRate, spreadRate: caSpreadRate,
-                diffusion: caDiffusion
-            )
-            enc.setBytes(&params, length: MemoryLayout<ForestFireParams>.stride, index: 0)
+            var blendParams = NoiseBlendParams(fireWeight: settings.fireWeight)
+            enc.setBytes(&blendParams, length: MemoryLayout<NoiseBlendParams>.stride, index: 0)
 
             let gridSize = MTLSize(width: resolution, height: resolution, depth: 1)
-            enc.dispatchThreads(gridSize, threadsPerThreadgroup: caThreadgroupSize)
+            enc.dispatchThreads(gridSize, threadsPerThreadgroup: threadgroupSize)
             enc.endEncoding()
-
-            caFrame += 1
-            caPingPong.toggle()
         }
 
-        // Current CA state (the one we just wrote, or last written if paused)
-        let currentCA = caPingPong ? caStateB : caStateA
-
-        // --- Pass 2: LIC ---
+        // --- Pass 3: LIC ---
         do {
             try licEncoder.encode(
                 commandBuffer: cmdBuf,
                 params: licParams,
                 kernelWeights: licWeights,
-                inputTexture: currentCA,
+                inputTexture: blendedTex,
                 vectorField: vectorField,
                 outputTexture: licOutput
             )
@@ -321,7 +352,7 @@ final class Renderer: NSObject, MTKViewDelegate {
             return
         }
 
-        // --- Pass 3: Display ---
+        // --- Pass 4: Display ---
         guard let renderEnc = cmdBuf.makeRenderCommandEncoder(descriptor: passDesc) else {
             semaphore.signal()
             return
@@ -329,7 +360,13 @@ final class Renderer: NSObject, MTKViewDelegate {
         renderEnc.setRenderPipelineState(displayPipeline)
         renderEnc.setFragmentTexture(licOutput, index: 0)
         renderEnc.setFragmentSamplerState(displaySampler, index: 0)
-        var displayParams = DisplayParams(fullSum: licParams.fullSum, gamma: 2.2)
+        var displayParams = DisplayParams(
+            fullSum: licParams.fullSum,
+            exposure: settings.exposure,
+            contrast: settings.contrast,
+            brightness: settings.brightness,
+            gamma: settings.gamma
+        )
         renderEnc.setFragmentBytes(&displayParams,
                                     length: MemoryLayout<DisplayParams>.stride,
                                     index: 0)
@@ -347,33 +384,36 @@ final class Renderer: NSObject, MTKViewDelegate {
 
         switch chars {
         case " ":
-            caPaused.toggle()
-        case "1": switchPreset(1)
-        case "2": switchPreset(2)
-        case "3": switchPreset(3)
-        case "4": switchPreset(4)
-        case "5": switchPreset(5)
+            ca.isPaused.toggle()
+        case "1": settings.vectorPreset = 1
+        case "2": settings.vectorPreset = 2
+        case "3": settings.vectorPreset = 3
+        case "4": settings.vectorPreset = 4
+        case "5": settings.vectorPreset = 5
+        case "6": settings.vectorPreset = 6
         case "r", "R":
-            initializeCA()
+            settings.resetRequested = true
         case "+", "=":
-            adjustKernelLength(delta: 2)
+            settings.kernelLength = min(60, settings.kernelLength + 2)
         case "-", "_":
-            adjustKernelLength(delta: -2)
+            settings.kernelLength = max(2, settings.kernelLength - 2)
         default:
             break
         }
     }
 
     private func switchPreset(_ preset: Int) {
-        guard preset != currentPreset else { return }
+        guard preset != currentPreset, preset >= 1, preset <= 6 else { return }
         currentPreset = preset
         uploadVectorField(preset: preset)
+        ca.setVectorField(vectorField)
     }
 
-    private func adjustKernelLength(delta: Float) {
-        currentL = max(2.0, min(60.0, currentL + delta))
+    private func adjustKernelLength(to newL: Float) {
+        let clamped = max(2.0, min(60.0, newL))
+        currentL = clamped
         do {
-            let result = try LICKernel.build(L: currentL, h: 1.0)
+            let result = try LICKernel.build(L: clamped, h: 1.0)
             licParams = result.params
             licWeights = result.weights
         } catch {

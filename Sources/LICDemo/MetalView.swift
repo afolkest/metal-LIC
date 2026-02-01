@@ -2,6 +2,8 @@ import SwiftUI
 import MetalKit
 
 struct MetalView: NSViewRepresentable {
+    @ObservedObject var settings: DemoSettings
+
     func makeNSView(context: Context) -> KeyableMTKView {
         let view = KeyableMTKView()
         guard let device = MTLCreateSystemDefaultDevice() else {
@@ -14,13 +16,17 @@ struct MetalView: NSViewRepresentable {
         view.isPaused = false
         view.enableSetNeedsDisplay = false
 
-        let renderer = Renderer(device: device, view: view)
+        let renderer = Renderer(device: device, view: view, settings: settings)
         view.delegate = renderer
-        view.keyHandler = renderer
         context.coordinator.renderer = renderer
 
-        DispatchQueue.main.async {
-            view.window?.makeFirstResponder(view)
+        // Use a local event monitor so keyboard shortcuts work even when
+        // SwiftUI sliders have focus.
+        context.coordinator.keyMonitor = NSEvent.addLocalMonitorForEvents(
+            matching: .keyDown
+        ) { event in
+            renderer.handleKeyDown(event)
+            return event
         }
 
         return view
@@ -34,15 +40,16 @@ struct MetalView: NSViewRepresentable {
 
     class Coordinator {
         var renderer: Renderer?
+        var keyMonitor: Any?
+
+        deinit {
+            if let monitor = keyMonitor {
+                NSEvent.removeMonitor(monitor)
+            }
+        }
     }
 }
 
 class KeyableMTKView: MTKView {
-    weak var keyHandler: Renderer?
-
     override var acceptsFirstResponder: Bool { true }
-
-    override func keyDown(with event: NSEvent) {
-        keyHandler?.handleKeyDown(event)
-    }
 }

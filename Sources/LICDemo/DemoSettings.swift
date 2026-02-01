@@ -1,0 +1,39 @@
+import SwiftUI
+
+final class DemoSettings: ObservableObject {
+
+    // MARK: - Display
+
+    @Published var exposure: Float = 1.0
+    @Published var contrast: Float = 1.0
+    @Published var brightness: Float = 0.0
+    @Published var gamma: Float = 2.2
+
+    // MARK: - Blend
+
+    @Published var fireWeight: Float = 0.781
+
+    // MARK: - LIC
+
+    @Published var kernelLength: Float = 20.0
+
+    // MARK: - Vector field
+
+    @Published var vectorPreset: Int = 6
+
+    // MARK: - CA
+
+    @Published var caValues: [String: Float] = [:]
+    @Published var caParameters: [CAParameter] = []
+
+    // MARK: - Actions
+
+    @Published var resetRequested = false
+
+    func populateFromCA(_ ca: CellularAutomaton) {
+        caParameters = ca.parameters
+        caValues = Dictionary(uniqueKeysWithValues:
+            ca.parameters.map { ($0.id, ca.getValue(for: $0.id)) }
+        )
+    }
+}
