@@ -534,15 +534,16 @@ final class LICInvariantTests: XCTestCase {
 
     // MARK: - Boundary processing gating
 
-    /// Boundary renormalization must only apply when edgeGainsEnabled is true.
-    /// With edgeGainsEnabled: false, GPU skips all Section 9 boundary processing.
-    /// CPU reference must do the same. Uses a rightward field on a small grid where
-    /// edge pixels hit domain boundaries, triggering renormalization differences.
-    func testBoundaryProcessing_edgeGainsDisabled_gpuMatchesCPU() throws {
+    /// Renormalization is always active for boundary-truncated kernels.
+    /// Edge gains are gated by edgeGainsEnabled. With edgeGainsEnabled: false
+    /// and no gain strengths, GPU must still match CPU (both renormalize).
+    /// With edgeGainsEnabled: true AND nonzero gain strength, boundary pixels
+    /// must differ from the no-gains case.
+    func testBoundaryProcessing_renormAlwaysActive_gainsGated() throws {
         let size = 16
         let (params, weights) = try LICKernel.build(L: 5)
 
-        // edgeGainsEnabled: false — GPU skips boundary processing entirely
+        // edgeGainsEnabled: false — renormalization still active, just no edge gains
         let config = LICPipelineConfig(edgeGainsEnabled: false)
 
         var rng = SplitMix64(seed: 11111)
@@ -572,21 +573,23 @@ final class LICInvariantTests: XCTestCase {
         print("--- Boundary gating (edgeGainsEnabled: false) ---")
         print("maxErr: \(maxErr), meanErr: \(meanErr), full_sum: \(params.fullSum)")
 
-        // With boundary processing disabled on both sides, error should be near zero.
+        // With renormalization active on both sides, error should be near zero.
         XCTAssertLessThan(meanErr, params.fullSum * 0.001,
             "edgeGainsEnabled=false: mean GPU/CPU error too large (\(meanErr))")
         XCTAssertLessThan(maxErr, params.fullSum * 0.01,
             "edgeGainsEnabled=false: max GPU/CPU error too large (\(maxErr))")
 
-        // Verify boundary pixels actually differ from edgeGainsEnabled: true
+        // Verify that nonzero domain edge gain strength changes boundary pixels
+        let (gainParams, gainWeights) = try LICKernel.build(L: 5,
+            domainEdgeGainStrength: 0.5, domainEdgeGainPower: 2)
         let enabledConfig = LICPipelineConfig(edgeGainsEnabled: true)
         try encoder.buildPipeline(for: enabledConfig)
         let enabledResult = try runGPU(
             input: input, field: field,
             width: size, height: size,
-            params: params, weights: weights, config: enabledConfig)
+            params: gainParams, weights: gainWeights, config: enabledConfig)
 
-        // Edge pixels (x=0 or x=15) should differ because renormalization changes their values
+        // Edge pixels (x=0 or x=15) should differ because edge gains boost their values
         var boundaryDiffCount = 0
         for y in 0..<size {
             for x in [0, size - 1] {
@@ -597,7 +600,7 @@ final class LICInvariantTests: XCTestCase {
             }
         }
         XCTAssertGreaterThan(boundaryDiffCount, 0,
-            "Boundary pixels must differ between edgeGainsEnabled true vs false")
+            "Boundary pixels must differ when domain edge gain strength > 0")
     }
 
     // MARK: - Domain edge gain with nonzero strength

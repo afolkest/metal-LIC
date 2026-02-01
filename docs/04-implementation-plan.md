@@ -38,7 +38,7 @@
 - [x] Resource reuse — all 4 production pipeline variants (mask × edgeGains) pre-built at init; threadgroup sizes cached per-pipeline; samplers and dummy mask already at init; params/weights use setBytes (correct for <4KB data). No per-frame allocation in the dispatch path.
 - [x] Multiple in-flight command buffers — `LICDispatcher` with semaphore-based pipelining (maxInFlight=3 default), per-frame ping-pong texture pools for multi-pass isolation, completion callbacks for GPU timing. `LICEncoder.encodeMultiPass` extended with optional `pingPongTextures` parameter for safe concurrent dispatch.
 - [x] Warm-up dispatch — `LICDispatcher.warmUp()` primes GPU caches, TLB entries, and driver state with a synchronous single-frame dispatch before the real-time loop.
-- [ ] bryLIC parity checks (SSIM, histogram distance, error heatmaps — advisory only)
+- [x] bryLIC parity checks (SSIM, histogram distance, error heatmaps — advisory only). Python generator (`scripts/generate_brylic_reference.py`) produces reference fixtures; Swift test (`LICParityTests`) computes SSIM (0.88–0.99), histogram chi-squared (<0.10), and per-pixel error stats across 14 scenes (6 baseline: uniform, vortex, saddle, radial, vortex_3pass, vortex_masked; 8 stress: vortex_2pass, vortex_edge_gain, radial_domain_gain, vortex_both_gains, radial_unnorm, shear, zero_patch, nan_patch). Divergence is expected due to RK2 vs pixel-crossing integration and bilinear vs nearest-neighbor field sampling. Run with `RUN_PARITY=1 swift test --filter LICParityTests`.
 
 **Exit criterion**: 2K@60fps or 4K@~30fps on M1 Pro with default params (L=30, h=1.0, 1 iteration).
 

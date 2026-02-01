@@ -66,12 +66,10 @@ final class LICDiagnosticTests: XCTestCase {
         XCTAssertEqual(center, expected, accuracy: expected * 0.01,
                        "Center pixel with constant input should equal full_sum (\(expected)), got \(center)")
 
-        // Edge pixel (x=0): truncated streamline, should be less than full_sum
+        // Edge pixel (x=0): truncated streamline, renormalized back to full_sum
         let edge = output[16 * size + 0]
-        XCTAssertLessThan(edge, expected,
-                          "Edge pixel should have truncated kernel (less than full_sum)")
-        XCTAssertGreaterThan(edge, 0,
-                             "Edge pixel should still be positive")
+        XCTAssertEqual(edge, expected, accuracy: expected * 0.01,
+                       "Edge pixel with constant input should be renormalized to full_sum (\(expected)), got \(edge)")
 
         // Print some diagnostics
         print("--- Constant Input Diagnostic ---")

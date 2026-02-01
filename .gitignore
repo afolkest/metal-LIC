@@ -6,3 +6,12 @@ LIC_papers/
 DerivedData/
 *.xcodeproj/xcuserdata/
 *.xcworkspace/xcuserdata/
+
+# Generated test fixtures (binary blobs)
+Tests/MetalLICTests/Fixtures/
+
+# Python
+__pycache__/
+
+# Test output images
+/output/

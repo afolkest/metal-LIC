@@ -186,41 +186,45 @@ kernel void licKernel(
     }
 
     // ------------------------------------------------------------------
-    // Boundary processing: renormalization + edge gains (Section 9)
-    // Gated by kEdgeGainsEnabled function constant.
+    // Boundary processing (Section 9)
+    // Renormalization is always active for boundary-truncated kernels.
+    // Edge gains are gated by kEdgeGainsEnabled function constant.
     // ------------------------------------------------------------------
-    if (kEdgeGainsEnabled) {
+    {
         bool needs_boundary = (used_sum > params.center_weight)
                            && (used_sum < params.full_sum);
         bool apply_mask_edge = hit_mask_edge && !starting_masked;
 
         if (needs_boundary && (apply_mask_edge || hit_domain_edge)) {
-            float support_factor = clamp(
-                (used_sum - params.center_weight) /
-                (params.full_sum - params.center_weight),
-                0.0f, 1.0f);
-
-            // Renormalize once
+            // Renormalize — always active
             value *= params.full_sum / used_sum;
 
-            // Mask edge gain
-            if (apply_mask_edge && params.edge_gain_strength > 0.0f) {
-                float t = clamp(
-                    (params.full_sum - used_sum) / params.full_sum,
+            // Edge gains — only when specialized pipeline enables them
+            if (kEdgeGainsEnabled) {
+                float support_factor = clamp(
+                    (used_sum - params.center_weight) /
+                    (params.full_sum - params.center_weight),
                     0.0f, 1.0f);
-                float gain = 1.0f + params.edge_gain_strength
-                    * pow(t, params.edge_gain_power) * support_factor;
-                value *= gain;
-            }
 
-            // Domain edge gain
-            if (hit_domain_edge && params.domain_edge_gain_strength > 0.0f) {
-                float t = clamp(
-                    (params.full_sum - used_sum) / params.full_sum,
-                    0.0f, 1.0f);
-                float gain = 1.0f + params.domain_edge_gain_strength
-                    * pow(t, params.domain_edge_gain_power) * support_factor;
-                value *= gain;
+                // Mask edge gain
+                if (apply_mask_edge && params.edge_gain_strength > 0.0f) {
+                    float t = clamp(
+                        (params.full_sum - used_sum) / params.full_sum,
+                        0.0f, 1.0f);
+                    float gain = 1.0f + params.edge_gain_strength
+                        * pow(t, params.edge_gain_power) * support_factor;
+                    value *= gain;
+                }
+
+                // Domain edge gain
+                if (hit_domain_edge && params.domain_edge_gain_strength > 0.0f) {
+                    float t = clamp(
+                        (params.full_sum - used_sum) / params.full_sum,
+                        0.0f, 1.0f);
+                    float gain = 1.0f + params.domain_edge_gain_strength
+                        * pow(t, params.domain_edge_gain_power) * support_factor;
+                    value *= gain;
+                }
             }
         }
     }

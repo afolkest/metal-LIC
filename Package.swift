@@ -15,7 +15,8 @@ let package = Package(
         ),
         .testTarget(
             name: "MetalLICTests",
-            dependencies: ["MetalLIC"]
+            dependencies: ["MetalLIC"],
+            exclude: ["Fixtures"]
         ),
     ]
 )

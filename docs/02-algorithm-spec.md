@@ -89,7 +89,7 @@ These bindings are fixed for v1 to avoid ambiguity across host/shader code.
 **Function constants**:
 Use Metal function constants for compile-time specialization of code paths that are uniform across a dispatch. The compiler eliminates dead branches entirely, avoiding per-pixel runtime cost.
 - `function_constant(0)`: `kMaskEnabled` (`bool`) — controls mask texture reads and mask boundary logic.
-- `function_constant(1)`: `kEdgeGainsEnabled` (`bool`) — controls boundary processing (renormalization + edge gains, Section 9).
+- `function_constant(1)`: `kEdgeGainsEnabled` (`bool`) — controls edge gain multipliers in boundary processing (Section 9). Renormalization itself is unconditional when a boundary/mask truncates the kernel.
 - `function_constant(2)`: `kDebugMode` (`uint`) — selects debug visualization output (0 = off / normal LIC, 1 = step count heat map, 2 = boundary hit visualization, 3 = used_sum / full_sum ratio).
 
 The host builds specialized `MTLComputePipelineState` variants for each active combination and caches them at init time. When masking is disabled, a 1x1 zero mask texture is still bound (keeps the signature uniform) but the shader skips mask reads entirely.
@@ -252,7 +252,7 @@ If `needs_boundary_processing && (apply_mask_edge || hit_domain_edge)` then:
    `value *= gain`
 
 Notes:
-- Renormalization and gains are **only** applied when a boundary/mask truncates the kernel.
+- Renormalization (step 2) is **always** applied when a boundary/mask truncates the kernel, regardless of `kEdgeGainsEnabled`. Edge gain multipliers (steps 3–4) are gated by `kEdgeGainsEnabled`.
 - If truncation happens for other reasons (e.g., NaNs in the vector field), no renormalization is performed.
 - Periodic boundaries are **not implemented in v1** (reserved for later).
 

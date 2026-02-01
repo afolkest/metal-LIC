@@ -176,16 +176,18 @@ public enum LICReferenceCPU {
                     }
                 }
 
-                // Boundary processing (Section 9), gated by edgeGainsEnabled
-                // to match GPU's kEdgeGainsEnabled function constant.
-                if edgeGainsEnabled {
-                    let needsBoundary = usedSum > centerWeight && usedSum < fullSum
-                    let applyMaskEdge = hitMaskEdge && !startingMasked
+                // Boundary processing (Section 9)
+                // Renormalization is always active for boundary-truncated kernels.
+                // Edge gains are gated by edgeGainsEnabled.
+                let needsBoundary = usedSum > centerWeight && usedSum < fullSum
+                let applyMaskEdge = hitMaskEdge && !startingMasked
 
-                    if needsBoundary && (applyMaskEdge || hitDomainEdge) {
+                if needsBoundary && (applyMaskEdge || hitDomainEdge) {
+                    value *= fullSum / usedSum
+
+                    if edgeGainsEnabled {
                         let sf = min(Float(1), max(Float(0),
                             (usedSum - centerWeight) / (fullSum - centerWeight)))
-                        value *= fullSum / usedSum
 
                         if applyMaskEdge && params.edgeGainStrength > 0 {
                             let t = min(Float(1), max(Float(0), (fullSum - usedSum) / fullSum))
@@ -343,16 +345,18 @@ public enum LICReferenceCPU {
                     }
                 }
 
-                // Boundary processing (Section 9), gated by edgeGainsEnabled
-                // to match GPU's kEdgeGainsEnabled function constant.
-                if edgeGainsEnabled {
-                    let needsBoundary = usedSum > centerWeight && usedSum < fullSum
-                    let applyMaskEdge = hitMaskEdge && !startingMasked
+                // Boundary processing (Section 9)
+                // Renormalization is always active for boundary-truncated kernels.
+                // Edge gains are gated by edgeGainsEnabled.
+                let needsBoundary = usedSum > centerWeight && usedSum < fullSum
+                let applyMaskEdge = hitMaskEdge && !startingMasked
 
-                    if needsBoundary && (applyMaskEdge || hitDomainEdge) {
+                if needsBoundary && (applyMaskEdge || hitDomainEdge) {
+                    value *= fullSum / usedSum
+
+                    if edgeGainsEnabled {
                         let sf = min(1.0, max(0.0,
                             (usedSum - centerWeight) / (fullSum - centerWeight)))
-                        value *= fullSum / usedSum
 
                         if applyMaskEdge && params.edgeGainStrength > 0 {
                             let t = min(1.0, max(0.0, (fullSum - usedSum) / fullSum))
