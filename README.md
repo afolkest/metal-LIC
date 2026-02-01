@@ -1,3 +1,5 @@
+<video src="https://github.com/user-attachments/assets/ebbd32f1-bf2a-4ad8-a226-b7ed347f0582" autoplay loop muted playsinline></video>
+
 # metal-LIC
 
 GPU implementation of Line Integral Convolution on Apple Silicon, written in Swift + Metal. 
