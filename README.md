@@ -1,7 +1,7 @@
 # metal-LIC
 
 GPU implementation of Line Integral Convolution on Apple Silicon, written in Swift + Metal. 
-Capable of real-time performance and 4k resolution. 
+Capable of real-time performance at 4k resolution (~40 fps in simple tests on my Apple M1 Pro machine). 
 
 ## What it does
 
