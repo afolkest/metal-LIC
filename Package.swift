@@ -13,6 +13,11 @@ let package = Package(
             name: "MetalLIC",
             resources: [.copy("Shaders")]
         ),
+        .executableTarget(
+            name: "LICDemo",
+            dependencies: ["MetalLIC"],
+            resources: [.copy("Shaders")]
+        ),
         .testTarget(
             name: "MetalLICTests",
             dependencies: ["MetalLIC"],
