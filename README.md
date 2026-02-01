@@ -7,7 +7,10 @@ Capable of real-time performance at 4k resolution (~40 fps in simple tests on my
 
 ## What it does
 
-Takes an input texture and a vector field, traces streamlines via RK2 integration with a Hann-windowed kernel, and outputs a grayscale LIC image. The entire pipeline runs as a Metal compute shader with no CPU readback.
+It takes an input texture and a vector field, traces streamlines via RK2 integration with a Hann-windowed kernel, and outputs a grayscale LIC image. The entire pipeline runs as a Metal compute shader with no CPU readback.
+
+Thanks to the performance of this implementation, it is possible to assign time-dynamics to the input texture that is getting convolved, giving
+a host of possible dynamic visualizations of the (static) vector field that do not flicker.  
 
 ## Performance
 
