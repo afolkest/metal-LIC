@@ -64,6 +64,17 @@ struct SliderOverlay: View {
                 .pickerStyle(.segmented)
                 .frame(width: 160)
             }
+            Button(action: { settings.isRecording.toggle() }) {
+                HStack(spacing: 4) {
+                    Circle()
+                        .fill(settings.isRecording ? Color.red : Color.red.opacity(0.5))
+                        .frame(width: 8, height: 8)
+                    Text(settings.isRecording ? "Stop Recording" : "Record")
+                        .font(.system(size: 11))
+                }
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
         }
     }
 
@@ -88,6 +99,18 @@ struct SliderOverlay: View {
         VStack(alignment: .leading, spacing: 6) {
             Text("LIC").font(.headline).foregroundColor(.white)
             paramSlider(label: "Kernel Length", value: $settings.kernelLength, range: 2...120)
+            HStack {
+                Text("Passes")
+                    .font(.system(size: 11))
+                    .foregroundColor(.white.opacity(0.8))
+                Spacer()
+                Picker("", selection: $settings.licPasses) {
+                    Text("1").tag(1)
+                    Text("2").tag(2)
+                }
+                .pickerStyle(.segmented)
+                .frame(width: 100)
+            }
         }
     }
 

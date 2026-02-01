@@ -63,6 +63,15 @@ final class Renderer: NSObject, MTKViewDelegate {
 
     private var currentPreset: Int = 6
 
+    // MARK: - Recording
+
+    private let videoRecorder = VideoRecorder()
+    private var stagingBuffers: [MTLBuffer] = []
+    private var stagingIndex = 0
+    private var wasRecording = false
+    private var recordingWidth = 0
+    private var recordingHeight = 0
+
     // MARK: - FPS tracking
 
     private var lastFrameTime: CFAbsoluteTime = 0
@@ -310,6 +319,20 @@ final class Renderer: NSObject, MTKViewDelegate {
         if settings.resolution != resolution {
             rebuildForResolution(settings.resolution)
         }
+
+        // Recording state transitions
+        let wantRecord = settings.isRecording
+        if !wantRecord && wasRecording {
+            wasRecording = false
+            videoRecorder.stopRecording { url in
+                if let url = url {
+                    print("Video saved to: \(url.path)")
+                }
+            }
+            stagingBuffers = []
+        } else if wantRecord && !wasRecording {
+            wasRecording = true
+        }
     }
 
     // MARK: - Frame rendering
@@ -344,9 +367,6 @@ final class Renderer: NSObject, MTKViewDelegate {
             return
         }
 
-        let sem = semaphore
-        cmdBuf.addCompletedHandler { _ in sem.signal() }
-
         // --- Pass 1: CA step ---
         ca.encodeStep(commandBuffer: cmdBuf)
 
@@ -366,15 +386,16 @@ final class Renderer: NSObject, MTKViewDelegate {
             enc.endEncoding()
         }
 
-        // --- Pass 3: LIC ---
+        // --- Pass 3: LIC (1 or 2 passes) ---
         do {
-            try licEncoder.encode(
+            try licEncoder.encodeMultiPass(
                 commandBuffer: cmdBuf,
                 params: licParams,
                 kernelWeights: licWeights,
                 inputTexture: blendedTex,
                 vectorField: vectorField,
-                outputTexture: licOutput
+                outputTexture: licOutput,
+                iterations: settings.licPasses
             )
         } catch {
             print("LIC encode error: \(error)")
@@ -402,6 +423,67 @@ final class Renderer: NSObject, MTKViewDelegate {
                                     index: 0)
         renderEnc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
         renderEnc.endEncoding()
+
+        // --- Recording: blit drawable to staging buffer ---
+        var capturedStaging: MTLBuffer? = nil
+        var capturedWidth = 0
+        var capturedHeight = 0
+
+        if wasRecording {
+            let drawableTex = drawable.texture
+            let w = drawableTex.width
+            let h = drawableTex.height
+
+            // Lazily start the writer on the first recorded frame
+            if !videoRecorder.isRecording {
+                do {
+                    let url = try videoRecorder.startRecording(width: w, height: h)
+                    recordingWidth = w
+                    recordingHeight = h
+                    stagingBuffers = (0..<maxInFlight).map {_ in
+                        device.makeBuffer(length: w * h * 4, options: .storageModeShared)!
+                    }
+                    stagingIndex = 0
+                    print("Recording to: \(url.path)")
+                } catch {
+                    print("Failed to start recording: \(error)")
+                    wasRecording = false
+                    DispatchQueue.main.async { [weak self] in
+                        self?.settings.isRecording = false
+                    }
+                }
+            }
+
+            if videoRecorder.isRecording && w == recordingWidth && h == recordingHeight {
+                let staging = stagingBuffers[stagingIndex % maxInFlight]
+                stagingIndex += 1
+
+                if let blit = cmdBuf.makeBlitCommandEncoder() {
+                    blit.copy(from: drawableTex,
+                              sourceSlice: 0, sourceLevel: 0,
+                              sourceOrigin: MTLOrigin(x: 0, y: 0, z: 0),
+                              sourceSize: MTLSize(width: w, height: h, depth: 1),
+                              to: staging,
+                              destinationOffset: 0,
+                              destinationBytesPerRow: w * 4,
+                              destinationBytesPerImage: w * h * 4)
+                    blit.endEncoding()
+
+                    capturedStaging = staging
+                    capturedWidth = w
+                    capturedHeight = h
+                }
+            }
+        }
+
+        let sem = semaphore
+        let recorder = videoRecorder
+        cmdBuf.addCompletedHandler { _ in
+            if let staging = capturedStaging {
+                recorder.appendFrame(from: staging, width: capturedWidth, height: capturedHeight)
+            }
+            sem.signal()
+        }
 
         cmdBuf.present(drawable)
         cmdBuf.commit()
