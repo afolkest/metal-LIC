@@ -117,11 +117,27 @@ struct SliderOverlay: View {
     private var caSection: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack {
-                Text("Fire CA").font(.headline).foregroundColor(.white)
+                Text(settings.caName.isEmpty ? "CA" : settings.caName)
+                    .font(.headline).foregroundColor(.white)
                 Spacer()
                 Button("Reset") { settings.resetRequested = true }
                     .buttonStyle(.bordered)
                     .controlSize(.small)
+            }
+            if settings.availableCAs.count > 1 {
+                HStack {
+                    Text("Type")
+                        .font(.system(size: 11))
+                        .foregroundColor(.white.opacity(0.8))
+                    Spacer()
+                    Picker("", selection: $settings.selectedCAIndex) {
+                        ForEach(Array(settings.availableCAs.enumerated()), id: \.offset) { index, name in
+                            Text(name).tag(index)
+                        }
+                    }
+                    .pickerStyle(.menu)
+                    .frame(maxWidth: 140)
+                }
             }
             ForEach(settings.caParameters) { param in
                 let binding = Binding<Float>(

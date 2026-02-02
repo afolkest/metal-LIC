@@ -32,6 +32,9 @@ final class DemoSettings: ObservableObject {
 
     // MARK: - CA
 
+    @Published var caName: String = ""
+    @Published var availableCAs: [String] = []
+    @Published var selectedCAIndex: Int = 0
     @Published var caValues: [String: Float] = [:]
     @Published var caParameters: [CAParameter] = []
 
@@ -44,6 +47,7 @@ final class DemoSettings: ObservableObject {
     @Published var resetRequested = false
 
     func populateFromCA(_ ca: CellularAutomaton) {
+        caName = ca.name
         caParameters = ca.parameters
         caValues = Dictionary(uniqueKeysWithValues:
             ca.parameters.map { ($0.id, ca.getValue(for: $0.id)) }

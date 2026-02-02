@@ -37,6 +37,9 @@ final class Renderer: NSObject, MTKViewDelegate {
 
     // MARK: - CA (protocol-based)
 
+    typealias CAFactory = (MTLDevice, MTLCommandQueue, MTLLibrary, Int) throws -> CellularAutomaton
+    private var caFactories: [(name: String, factory: CAFactory)] = []
+    private var currentCAIndex: Int = 0
     private var ca: CellularAutomaton
 
     // MARK: - Noise blend
@@ -171,11 +174,16 @@ final class Renderer: NSObject, MTKViewDelegate {
         self.noiseTex = Renderer.makeStaticNoise(device: device, commandQueue: queue,
                                                    width: w, height: h)
 
+        // --- CA factory registry ---
+        self.caFactories = [
+            ("Forest Fire", { dev, queue, lib, res in
+                try ForestFireCA(device: dev, commandQueue: queue, library: lib, resolution: res)
+            }),
+        ]
+
         // --- Create CA ---
         do {
-            let fireCA = try ForestFireCA(device: device, commandQueue: queue,
-                                           library: self.demoLibrary, resolution: resolution)
-            self.ca = fireCA
+            self.ca = try self.caFactories[0].factory(device, queue, self.demoLibrary, resolution)
         } catch {
             fatalError("Failed to create CA: \(error)")
         }
@@ -183,6 +191,8 @@ final class Renderer: NSObject, MTKViewDelegate {
         super.init()
 
         // Initialize settings from CA
+        settings.availableCAs = caFactories.map(\.name)
+        settings.selectedCAIndex = currentCAIndex
         settings.populateFromCA(ca)
         settings.vectorPreset = currentPreset
 
@@ -194,19 +204,15 @@ final class Renderer: NSObject, MTKViewDelegate {
     // MARK: - Shader compilation
 
     private static func makeDemoLibrary(device: MTLDevice) throws -> MTLLibrary {
-        guard let ffURL = Bundle.module.url(forResource: "ForestFire", withExtension: "metal",
+        guard let urls = Bundle.module.urls(forResourcesWithExtension: "metal",
                                              subdirectory: "Shaders"),
-              let dispURL = Bundle.module.url(forResource: "Display", withExtension: "metal",
-                                               subdirectory: "Shaders"),
-              let blendURL = Bundle.module.url(forResource: "NoiseBlend", withExtension: "metal",
-                                                subdirectory: "Shaders") else {
-            fatalError("Demo shader sources not found in bundle")
+              !urls.isEmpty else {
+            fatalError("No .metal shader sources found in bundle Shaders/")
         }
-        let ffSource = try String(contentsOf: ffURL, encoding: .utf8)
-        let dispSource = try String(contentsOf: dispURL, encoding: .utf8)
-        let blendSource = try String(contentsOf: blendURL, encoding: .utf8)
-
-        let combined = ffSource + "\n" + dispSource + "\n" + blendSource
+        let combined = try urls
+            .sorted { $0.lastPathComponent < $1.lastPathComponent }
+            .map { try String(contentsOf: $0, encoding: .utf8) }
+            .joined(separator: "\n")
         return try device.makeLibrary(source: combined, options: nil)
     }
 
@@ -313,6 +319,11 @@ final class Renderer: NSObject, MTKViewDelegate {
         // Preset change
         if settings.vectorPreset != currentPreset {
             switchPreset(settings.vectorPreset)
+        }
+
+        // CA switch
+        if settings.selectedCAIndex != currentCAIndex {
+            switchCA(to: settings.selectedCAIndex)
         }
 
         // Resolution change
@@ -542,9 +553,7 @@ final class Renderer: NSObject, MTKViewDelegate {
                                              width: w, height: h)
 
         do {
-            let fireCA = try ForestFireCA(device: device, commandQueue: commandQueue,
-                                           library: demoLibrary, resolution: newRes)
-            ca = fireCA
+            ca = try caFactories[currentCAIndex].factory(device, commandQueue, demoLibrary, newRes)
             settings.populateFromCA(ca)
         } catch {
             print("Failed to recreate CA: \(error)")
@@ -558,6 +567,18 @@ final class Renderer: NSObject, MTKViewDelegate {
         // and its completed handler will signal its own slot).
         for _ in 0..<(maxInFlight - 1) {
             semaphore.signal()
+        }
+    }
+
+    private func switchCA(to index: Int) {
+        guard index >= 0, index < caFactories.count, index != currentCAIndex else { return }
+        do {
+            ca = try caFactories[index].factory(device, commandQueue, demoLibrary, resolution)
+            currentCAIndex = index
+            settings.populateFromCA(ca)
+            ca.setVectorField(vectorField)
+        } catch {
+            print("Failed to switch CA: \(error)")
         }
     }
 
