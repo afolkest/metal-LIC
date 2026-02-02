@@ -7,22 +7,20 @@ Capable of real-time performance at 4k resolution (~40 fps in simple tests on my
 
 ## What it does
 
-It takes an input texture and a vector field, traces streamlines via RK2 integration with a Hann-windowed kernel, and outputs a grayscale LIC image. The entire pipeline runs as a Metal compute shader with no CPU readback.
+It takes an input texture and a vector field, convolves the texture along the streamlines of the vector field, and outputs a grayscale LIC image. The entire pipeline runs as a Metal compute shader.
 
-Thanks to the performance of this implementation, it is possible to assign time-dynamics to the input texture that is getting convolved, giving
+Thanks to the performance of the implementation, it is possible to assign time-dynamics to the input texture that is getting convolved, giving
 a host of possible dynamic visualizations of the (static) vector field that do not flicker.  
 
 ## Performance
 
-Measured GPU time on M1 Pro, single pass, kernel length 30 pixels:
+Measured GPU time on M1 Pro, single convolution pass, kernel length 30 pixels:
 
 | Resolution | Uniform field | Vortex field |
 |---|---|---|
 | 1080p | 238 fps | 179 fps |
 | 2048x2048 | 118 fps | 88 fps |
 | 3840x2160 | 60 fps | 46 fps |
-
-Throughput scales linearly with pixel count. Multi-pass (3x) at 2K runs at ~35 fps.
 
 ## Usage
 
