@@ -176,6 +176,9 @@ final class Renderer: NSObject, MTKViewDelegate {
 
         // --- CA factory registry ---
         self.caFactories = [
+            ("Drossel-Schwabl", { dev, queue, lib, res in
+                try DrosselSchwablCA(device: dev, commandQueue: queue, library: lib, resolution: res)
+            }),
             ("Forest Fire", { dev, queue, lib, res in
                 try ForestFireCA(device: dev, commandQueue: queue, library: lib, resolution: res)
             }),
@@ -381,37 +384,41 @@ final class Renderer: NSObject, MTKViewDelegate {
         // --- Pass 1: CA step ---
         ca.encodeStep(commandBuffer: cmdBuf)
 
-        // --- Pass 2: Noise blend ---
-        do {
-            guard let enc = cmdBuf.makeComputeCommandEncoder() else { return }
-            enc.setComputePipelineState(noiseBlendPipeline)
-            enc.setTexture(ca.licInputTexture, index: 0)
-            enc.setTexture(noiseTex, index: 1)
-            enc.setTexture(blendedTex, index: 2)
+        let rawMode = currentL <= 1.0
 
-            var blendParams = NoiseBlendParams(fireWeight: settings.fireWeight)
-            enc.setBytes(&blendParams, length: MemoryLayout<NoiseBlendParams>.stride, index: 0)
+        if !rawMode {
+            // --- Pass 2: Noise blend ---
+            do {
+                guard let enc = cmdBuf.makeComputeCommandEncoder() else { return }
+                enc.setComputePipelineState(noiseBlendPipeline)
+                enc.setTexture(ca.licInputTexture, index: 0)
+                enc.setTexture(noiseTex, index: 1)
+                enc.setTexture(blendedTex, index: 2)
 
-            let gridSize = MTLSize(width: resolution, height: resolution, depth: 1)
-            enc.dispatchThreads(gridSize, threadsPerThreadgroup: threadgroupSize)
-            enc.endEncoding()
-        }
+                var blendParams = NoiseBlendParams(fireWeight: settings.fireWeight)
+                enc.setBytes(&blendParams, length: MemoryLayout<NoiseBlendParams>.stride, index: 0)
 
-        // --- Pass 3: LIC (1 or 2 passes) ---
-        do {
-            try licEncoder.encodeMultiPass(
-                commandBuffer: cmdBuf,
-                params: licParams,
-                kernelWeights: licWeights,
-                inputTexture: blendedTex,
-                vectorField: vectorField,
-                outputTexture: licOutput,
-                iterations: settings.licPasses
-            )
-        } catch {
-            print("LIC encode error: \(error)")
-            semaphore.signal()
-            return
+                let gridSize = MTLSize(width: resolution, height: resolution, depth: 1)
+                enc.dispatchThreads(gridSize, threadsPerThreadgroup: threadgroupSize)
+                enc.endEncoding()
+            }
+
+            // --- Pass 3: LIC (1 or 2 passes) ---
+            do {
+                try licEncoder.encodeMultiPass(
+                    commandBuffer: cmdBuf,
+                    params: licParams,
+                    kernelWeights: licWeights,
+                    inputTexture: blendedTex,
+                    vectorField: vectorField,
+                    outputTexture: licOutput,
+                    iterations: settings.licPasses
+                )
+            } catch {
+                print("LIC encode error: \(error)")
+                semaphore.signal()
+                return
+            }
         }
 
         // --- Pass 4: Display ---
@@ -420,10 +427,10 @@ final class Renderer: NSObject, MTKViewDelegate {
             return
         }
         renderEnc.setRenderPipelineState(displayPipeline)
-        renderEnc.setFragmentTexture(licOutput, index: 0)
+        renderEnc.setFragmentTexture(rawMode ? ca.licInputTexture : licOutput, index: 0)
         renderEnc.setFragmentSamplerState(displaySampler, index: 0)
         var displayParams = DisplayParams(
-            fullSum: licParams.fullSum,
+            fullSum: rawMode ? 1.0 : licParams.fullSum,
             exposure: settings.exposure,
             contrast: settings.contrast,
             brightness: settings.brightness,
@@ -519,7 +526,7 @@ final class Renderer: NSObject, MTKViewDelegate {
         case "+", "=":
             settings.kernelLength = min(120, settings.kernelLength + 2)
         case "-", "_":
-            settings.kernelLength = max(2, settings.kernelLength - 2)
+            settings.kernelLength = max(1, settings.kernelLength - 2)
         default:
             break
         }
@@ -583,8 +590,9 @@ final class Renderer: NSObject, MTKViewDelegate {
     }
 
     private func adjustKernelLength(to newL: Float) {
-        let clamped = max(2.0, min(120.0, newL))
+        let clamped = max(1.0, min(120.0, newL))
         currentL = clamped
+        guard clamped > 1.0 else { return }  // L=1 → raw CA mode, no kernel needed
         do {
             let result = try LICKernel.build(L: clamped, h: 1.0)
             licParams = result.params

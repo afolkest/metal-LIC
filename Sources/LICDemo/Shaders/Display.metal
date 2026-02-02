@@ -50,22 +50,5 @@ fragment float4 displayFragment(
     // Gamma correction
     v = pow(v, 1.0 / params.gamma);
 
-    // mpl:twilight colormap (8 evenly-spaced stops)
-    constexpr float3 twilight[8] = {
-        float3(0.886, 0.850, 0.888),
-        float3(0.538, 0.678, 0.771),
-        float3(0.373, 0.381, 0.706),
-        float3(0.287, 0.082, 0.393),
-        float3(0.315, 0.079, 0.268),
-        float3(0.646, 0.262, 0.312),
-        float3(0.790, 0.598, 0.486),
-        float3(0.886, 0.850, 0.886),
-    };
-
-    float t = v * 7.0;
-    int idx = clamp(int(t), 0, 6);
-    float frac = t - float(idx);
-    float3 color = mix(twilight[idx], twilight[idx + 1], frac);
-
-    return float4(color, 1.0);
+    return float4(v, v, v, 1.0);
 }

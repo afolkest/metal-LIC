@@ -14,13 +14,13 @@ struct LICDemoApp: App {
 
     var body: some Scene {
         WindowGroup {
-            ZStack(alignment: .topTrailing) {
+            HStack(spacing: 0) {
                 MetalView(settings: settings)
                     .aspectRatio(1, contentMode: .fit)
                 SliderOverlay(settings: settings)
             }
-            .frame(minWidth: 512, minHeight: 512)
+            .frame(minWidth: 780, minHeight: 512)
         }
-        .defaultSize(width: 1024, height: 1024)
+        .defaultSize(width: 1300, height: 1024)
     }
 }

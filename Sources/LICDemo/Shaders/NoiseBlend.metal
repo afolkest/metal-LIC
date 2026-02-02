@@ -18,7 +18,7 @@ kernel void noiseBlendKernel(
 
     float heat  = heatTex.read(gid).r;
     float noise = noiseTex.read(gid).r;
-    float blended = params.fireWeight * heat + (1.0 - params.fireWeight) * noise;
+    float blended = noise * (1.0 - params.fireWeight * (1.0 - heat));
 
     blendedOut.write(float4(blended, 0.0, 0.0, 1.0), gid);
 }

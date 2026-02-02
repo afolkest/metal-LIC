@@ -31,10 +31,8 @@ struct SliderOverlay: View {
                     }
                     .padding(12)
                 }
-                .frame(minWidth: 260, idealWidth: 260, maxWidth: 260,
-                       maxHeight: 600)
+                .frame(width: 260)
                 .background(.ultraThinMaterial)
-                .cornerRadius(8)
             }
         }
         .padding(8)
@@ -98,7 +96,7 @@ struct SliderOverlay: View {
     private var licSection: some View {
         VStack(alignment: .leading, spacing: 6) {
             Text("LIC").font(.headline).foregroundColor(.white)
-            paramSlider(label: "Kernel Length", value: $settings.kernelLength, range: 2...120)
+            paramSlider(label: "Kernel Length", value: $settings.kernelLength, range: 1...120)
             HStack {
                 Text("Passes")
                     .font(.system(size: 11))
