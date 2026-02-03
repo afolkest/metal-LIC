@@ -11,7 +11,7 @@ struct MetalView: NSViewRepresentable {
         }
         view.device = device
         view.colorPixelFormat = .bgra8Unorm
-        view.framebufferOnly = true
+        view.framebufferOnly = false
         view.preferredFramesPerSecond = 60
         view.isPaused = false
         view.enableSetNeedsDisplay = false
